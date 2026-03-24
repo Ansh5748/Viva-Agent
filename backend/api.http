@@ -1,0 +1,103 @@
+@baseUrl = http://localhost:8000/api
+
+@collegeAdminEmail = testcollege@example.com
+@collegeAdminPassword = password123
+@studentEmail = teststudent@example.com
+
+@accessToken = 
+@refreshToken = 
+
+###
+# 1. Register a new College Admin
+# NOTE: If you use the ADMIN_EMAIL from .env, this user becomes a Global Admin.
+POST {{baseUrl}}/colleges/create
+Content-Type: application/json
+
+{
+  "name": "Test Institute of Technology",
+  "admin_email": "{{collegeAdminEmail}}",
+  "admin_password": "{{collegeAdminPassword}}",
+  "admin_full_name": "Dr. Admin"
+}
+
+###
+# 2. Login as College Admin
+# @name loginAdmin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{collegeAdminEmail}}",
+  "password": "{{collegeAdminPassword}}"
+}
+
+@accessToken = {{loginAdmin.response.body.access_token}}
+@refreshToken = {{loginAdmin.response.body.refresh_token}}
+
+###
+# 3. Get College Admin's college details
+GET {{baseUrl}}/colleges/my
+Authorization: Bearer {{accessToken}}
+
+###
+# 4. Login as a Student
+# (First, upload a student via the UI with this email)
+# @name loginStudent
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{studentEmail}}",
+  "password": "Student@123"
+}
+
+@studentAccessToken = {{loginStudent.response.body.access_token}}
+
+###
+# 5. Get Student's scheduled exams
+GET {{baseUrl}}/viva-exams/my-exams
+Authorization: Bearer {{studentAccessToken}}
+
+###
+# 6. Get College Analytics (as College Admin)
+GET {{baseUrl}}/analytics/college
+Authorization: Bearer {{accessToken}}
+
+###
+# 7. Synthesize Speech (get audio for a question)
+POST {{baseUrl}}/voice/synthesize
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "text": "Hello, can you explain the concept of object-oriented programming?"
+}
+
+###
+# 8. Refresh Access Token
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "{{refreshToken}}"
+}
+
+###
+# 9. Forgot Password Request
+POST {{baseUrl}}/auth/forgot-password
+Content-Type: application/json
+
+{
+  "email": "{{collegeAdminEmail}}"
+}
+
+###
+# NOTE: File uploads (Students, Questions) and creating exam sets
+# are best tested through the UI due to the multipart/form-data and complex JSON.
+#
+# To test student upload:
+# POST {{baseUrl}}/students/bulk-upload
+# Authorization: Bearer {{accessToken}}
+# Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+# (Body would be a file, which is hard to represent here)
