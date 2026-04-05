@@ -10,6 +10,7 @@ def generate_id():
 class UserRole(str, Enum):
     GLOBAL_ADMIN = "global_admin"
     COLLEGE_ADMIN = "college_admin"
+    TEACHER = "teacher"
     STUDENT = "student"
 
 class SubscriptionStatus(str, Enum):
@@ -139,6 +140,37 @@ class Student(BaseModel):
 class StudentBulkUpload(BaseModel):
     students: List[Dict[str, str]] # Expects list of dicts like {"student_id": "...", "full_name": "...", "email": "..."}
 
+class TeacherPermissions(BaseModel):
+    student_data: Optional[List[str]] = [] # List of batches, or ['all']
+    question_bank: bool = False
+    exam_set: bool = False
+    analytics: str = "none" # 'none', 'overall', 'subject_wise', 'batch_wise'
+    manage_teachers: bool = False # Permission to manage other teachers
+
+class Teacher(BaseModel):
+    id: str = Field(default_factory=generate_id)
+    college_id: str
+    user_id: str # Link to the User account
+    full_name: str
+    email: EmailStr
+    subject: Optional[str] = None
+    permissions: TeacherPermissions
+    password: Optional[str] = None # For initial creation display
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class TeacherCreate(BaseModel):
+    full_name: str
+    email: EmailStr
+    password: str = Field(min_length=8)
+    subject: Optional[str] = None
+    permissions: TeacherPermissions
+
+class TeacherUpdate(BaseModel):
+    full_name: Optional[str] = None
+    subject: Optional[str] = None
+    permissions: Optional[TeacherPermissions] = None
+    password: Optional[str] = None
+
 class Question(BaseModel):
     id: str = Field(default_factory=generate_id)
     college_id: str
@@ -222,6 +254,7 @@ class QARecord(BaseModel):
     answer_key: str
     score: float
     max_score: float
+    evaluation: Optional[Dict[str, Any]] = None # Detailed evaluation from LLM (feedback, etc)
     transcript: Optional[str] = None # Raw ASR transcript
     audio_file_path: Optional[str] = None # Path to stored audio file
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

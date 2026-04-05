@@ -16,6 +16,10 @@ const StudentDashboard = () => {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [processingExamId, setProcessingExamId] = useState(null);
   const [selectedExamAnalysis, setSelectedExamAnalysis] = useState(null);
+  
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const ITEMS_PER_PAGE = 5;
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -91,17 +95,24 @@ const StudentDashboard = () => {
     : 0;
   const completionRate = exams.length > 0 ? Math.round((completedExams.length / exams.length) * 100) : 0;
 
+  // Sort exams: Latest first
+  const sortedExams = [...exams].sort((a, b) => {
+    return new Date(b.created_at) - new Date(a.created_at);
+  });
+  const totalPages = Math.ceil(sortedExams.length / ITEMS_PER_PAGE);
+  const paginatedExams = sortedExams.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
+
   return (
     <div className="min-h-screen bg-background text-foreground transition-colors duration-300">
       <nav className="bg-card/50 backdrop-blur-md border-b border-border px-6 py-4 flex items-center justify-between sticky top-0 z-10">
         <div className="flex items-center gap-4">
-          <div className="w-10 h-10 bg-ar-gradient rounded-xl flex items-center justify-center shadow-lg shadow-primary/20">
+          <div className="inner-block w-10 h-10 bg-food-gradient rounded-xl flex items-center justify-center shadow-lg shadow-primary/20">
             <Mic className="w-6 h-6 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-brand-gradient">Student Portal</h1>
+            <h1 className="inline-block text-xl font-bold text-transparent bg-gradient-to-r from-orange-400 via-orange-300 to-orange-200 bg-clip-text">{user?.full_name}</h1>
             <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest">{user?.college_name}</p>
-            <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest">{user?.full_name}</p>
+            {/* <p className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Student Portal</p> */}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -152,7 +163,7 @@ const StudentDashboard = () => {
             </div>
             <div>
               <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider">Avg. Score</p>
-              <p className="text-2xl font-bold">{avgScore}/10</p>
+              <p className="text-2xl font-bold">{avgScore}/{completedExams[0]?.max_score || 10}</p>
             </div>
           </div>
           <div className="bg-card border border-border rounded-3xl p-6 shadow-sm flex items-center gap-4">
@@ -161,7 +172,7 @@ const StudentDashboard = () => {
             </div>
             <div>
               <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider">Best Score</p>
-              <p className="text-2xl font-bold">{highestScore}/10</p>
+              <p className="text-2xl font-bold">{highestScore}/{completedExams[0]?.max_score || 10}</p>
             </div>
           </div>
         </div>
@@ -178,12 +189,12 @@ const StudentDashboard = () => {
                   <div key={idx}>
                     <div className="flex justify-between text-sm font-bold mb-2">
                       <span>{exam.exam_name || 'Viva Exam'}</span>
-                      <span className="text-primary">{exam.score || 0}/10</span>
+                      <span className="text-primary">{exam.score || 0}/{exam.max_score || 10}</span>
                     </div>
                     <div className="h-3 w-full bg-muted rounded-full overflow-hidden">
                       <div 
                         className="h-full bg-brand-gradient rounded-full transition-all duration-1000" 
-                        style={{ width: `${(exam.score || 0) * 10}%` }}
+                        style={{ width: `${((exam.score || 0) / (exam.max_score || 10)) * 100}%` }}
                       ></div>
                     </div>
                   </div>
@@ -218,7 +229,7 @@ const StudentDashboard = () => {
           </div>
         ) : (
           <div className="grid gap-6">
-            {exams.map((exam) => {
+            {paginatedExams.map((exam) => {
               const startTime = exam.start_time ? new Date(exam.start_time) : null;
               const endTime = exam.end_time ? new Date(exam.end_time) : null;
               const isBefore = startTime && currentTime < startTime;
@@ -244,7 +255,7 @@ const StudentDashboard = () => {
                           {exam.status}
                         </span>
                         {exam.status === 'completed' && exam.score !== undefined && (
-                          <span className="flex items-center gap-1.5 text-primary font-bold"><Award className="w-4 h-4" /> Score: {exam.score}/10</span>
+                          <span className="flex items-center gap-1.5 text-primary font-bold"><Award className="w-4 h-4" /> Score: {exam.score}/{exam.max_score || 10}</span>
                         )}
                       </div>
                     </div>
@@ -275,6 +286,14 @@ const StudentDashboard = () => {
             })}
           </div>
         )}
+
+        {totalPages > 1 && (
+          <div className="flex items-center justify-center gap-4 mt-10">
+            <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="rounded-xl">Previous</Button>
+            <span className="text-sm font-bold">Page {currentPage} of {totalPages}</span>
+            <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="rounded-xl">Next</Button>
+          </div>
+        )}
       </main>
 
       {/* Analysis Modal */}
@@ -296,8 +315,8 @@ const StudentDashboard = () => {
                 <div className="w-24 h-24 rounded-full bg-success-gradient flex items-center justify-center text-white shadow-lg mb-4">
                   <span className="text-4xl font-bold">{selectedExamAnalysis.total_score?.toFixed(1) || 0}</span>
                 </div>
-                <p className="text-lg font-bold">Total Score / 10</p>
-                <p className="text-muted-foreground">Great effort! Here is your summary.</p>
+                <p className="text-lg font-bold">Total Score / {selectedExamAnalysis.qa_records?.length * 10 || 10}</p>
+                <p className="text-muted-foreground">Great ffort! Here is your summary.</p>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -333,7 +352,7 @@ const StudentDashboard = () => {
                       </div>
                       <div className="bg-primary/5 p-3 rounded-xl">
                         <p className="text-xs font-bold text-primary uppercase mb-1">Feedback</p>
-                        <p className="text-sm">{record.evaluation?.feedback || "No feedback provided."}</p>
+                        <p className="text-sm">{record.evaluation?.feedback || record.feedback || "Good effort! Your response has been recorded."}</p>
                       </div>
                     </div>
                   </div>

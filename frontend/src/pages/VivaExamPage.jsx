@@ -26,9 +26,15 @@ const VivaExamPage = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [examStage, setExamStage] = useState('loading'); // 'loading', 'intro', 'exam', 'completed'
   const [chatHistory, setChatHistory] = useState([]);
+  const [isQuestionSpoken, setIsQuestionSpoken] = useState(false);
+  const [warningCount, setWarningCount] = useState(0);
+  const isAwayRef = useRef(false);
+  const violationCountRef = useRef(0);
+  const violationTimerRef = useRef(null);
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const audioRef = useRef(null); // Ref to store current playing audio
   const stageRef = useRef('loading');
   const chatEndRef = useRef(null);
   const introPlayedRef = useRef(false);
@@ -50,6 +56,14 @@ const VivaExamPage = () => {
 
   const fetchRef = useRef(false);
 
+  // useEffect(() => {
+  //   // Prevent body scrolling while on this page
+  //   document.body.style.overflow = 'hidden';
+  //   return () => {
+  //     document.body.style.overflow = 'auto';
+  //   };
+  // }, []);
+
   useEffect(() => {
     const fetchExamDetails = async () => {
       if (fetchRef.current) return;
@@ -60,17 +74,32 @@ const VivaExamPage = () => {
         setQuestions(res.data.questions);
         setTimeLeft(res.data.duration_minutes * 60);
         
+      // If the exam is in progress and has answered questions, skip intro
+      if (res.data.status === 'in_progress' && res.data.answered_count > 0) {
+        const nextIndex = Math.min(res.data.answered_count, res.data.questions.length - 1);
+        setExamStage('exam');
+        stageRef.current = 'exam';
+        setCurrentQuestionIndex(nextIndex);
+      } else {
         setExamStage('intro');
-        if (!introPlayedRef.current) {
-          introPlayedRef.current = true;
-          playAudio("Hello. I am your AI examiner. Before we begin the questions, please briefly introduce yourself.", true);
-        }
+      } 
       } catch (error) {
         toast.error(error.response?.data?.detail || 'Failed to start exam.');
         navigate('/student/dashboard');
       }
     };
     fetchExamDetails();
+
+    // Cleanup on unmount
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
   }, [examId, navigate]);
 
   useEffect(() => {
@@ -84,62 +113,139 @@ const VivaExamPage = () => {
     return () => clearInterval(timer);
   }, [timeLeft, exam, examStage]);
 
+  useEffect(() => {
+    // Speak the question whenever the current question changes or stage becomes 'exam'
+    if (examStage === 'exam' && questions[currentQuestionIndex] && !isQuestionSpoken) {
+      const currentQuestionText = questions[currentQuestionIndex].question_text;
+      
+      // Check if this question has already been added to chat history recently
+      // to avoid double playback during transitions
+      const lastAiMsg = [...chatHistory].reverse().find(m => m.sender === 'ai');
+      
+      if (!lastAiMsg || lastAiMsg.text !== currentQuestionText) {
+        console.log("STAGE_EFFECT: Speaking current question:", currentQuestionText);
+        setIsQuestionSpoken(true);
+        playAudio(currentQuestionText, true).then(() => {
+          // Optional: auto-start recording after question is read
+          // But only if we are not already recording or processing
+          if (!isRecording && !isProcessing) {
+            startRecording();
+          }
+        });
+      }
+    } else if (examStage === 'intro' && !introPlayedRef.current && exam) {
+      // Handle missing introduction
+      console.log("STAGE_EFFECT: Playing introduction for exam:", exam.exam_name);
+      introPlayedRef.current = true;
+      const welcomeText = `Welcome to your ${exam.exam_name || 'Viva'} session. I am your AI examiner. Before we begin the questions, please briefly introduce yourself. Mention your name and student ID for verification.`;
+      
+      playAudio(welcomeText, true)
+        .then(() => {
+          console.log("STAGE_EFFECT: Intro audio finished, starting recording...");
+          if (stageRef.current === 'intro') {
+            startRecording();
+          }
+        });
+    }
+  }, [examStage, currentQuestionIndex, questions, chatHistory, isQuestionSpoken, exam]);
+
   // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory]);
 
-  const playAudio = async (text, addToChat = false) => {
-    try {
-      if (addToChat) {
-        setChatHistory(prev => {
-          const lastMsg = prev[prev.length - 1];
-          if (lastMsg && lastMsg.text === text && lastMsg.sender === 'ai') return prev;
-          return [...prev, { sender: 'ai', text, timestamp: new Date() }];
-        });
-      }
+  const playAudio = (text, addToChat = false) => {
+    return new Promise(async (resolve) => {
+      try {
+        console.log("PLAY_AUDIO: Starting playback for:", text.substring(0, 50) + "...");
+        if (addToChat) {
+          setChatHistory(prev => {
+            const lastMsg = prev[prev.length - 1];
+            if (lastMsg && lastMsg.text === text && lastMsg.sender === 'ai') return prev;
+            return [...prev, { sender: 'ai', text, timestamp: new Date() }];
+          });
+        }
 
-      // 1. Try Backend ElevenLabs TTS
-      const response = await api.post('/voice/synthesize', { text });
-      
-      if (response.data && response.data.audio) {
-        const audio = new Audio(`data:audio/mp3;base64,${response.data.audio}`);
-        await audio.play();
-        return;
-      }
-      
-      // 2. Fallback to Browser Speech Synthesis if Backend fails or returns empty
-      console.warn("Backend TTS failed or returned empty. Using Browser Fallback.");
-      speakWithBrowser(text);
+        // Stop any current audio
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current = null;
+        }
 
-    } catch (error) {
-      console.error('TTS Error, attempting Browser Fallback:', error);
-      speakWithBrowser(text);
-    }
+        // Stop any ongoing browser speech synthesis
+        if ('speechSynthesis' in window) {
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.resume(); // Chrome bug fix
+        }
+
+        // 1. Try Backend ElevenLabs TTS
+        const response = await api.post('/voice/synthesize', { text });
+        
+        if (response.data && response.data.audio) {
+          const audio = new Audio(`data:audio/mp3;base64,${response.data.audio}`);
+          audioRef.current = audio;
+          audio.onended = () => {
+            console.log("PLAY_AUDIO: Audio playback ended.");
+            resolve();
+          };
+          audio.onerror = (e) => {
+            console.error("PLAY_AUDIO: Audio object error:", e);
+            speakWithBrowser(text).then(resolve);
+          };
+          await audio.play();
+          return;
+        }
+        
+        // 2. Fallback to Browser Speech Synthesis if Backend fails or returns empty
+        console.warn("Backend TTS failed or returned empty. Using Browser Fallback.");
+        speakWithBrowser(text).then(resolve);
+
+      } catch (error) {
+        console.error('TTS Error, attempting Browser Fallback:', error);
+        speakWithBrowser(text).then(resolve);
+      }
+    });
   };
 
   const speakWithBrowser = (text) => {
-    if (!('speechSynthesis' in window)) {
-      console.error("Browser does not support Speech Synthesis.");
-      return;
-    }
+    return new Promise((resolve) => {
+      if (!('speechSynthesis' in window)) {
+        console.error("Browser does not support Speech Synthesis.");
+        resolve();
+        return;
+      }
 
-    // Cancel any ongoing speech
-    window.speechSynthesis.cancel();
+      // Cancel any ongoing speech
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.resume(); // Fix for Chrome speech synthesis getting stuck
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    
-    // Try to find a good English voice
-    const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find(v => 
-      v.lang.includes('en-IN') || v.lang.includes('en-GB') || v.lang.includes('en-US')
-    );
-    
-    if (preferredVoice) utterance.voice = preferredVoice;
-    utterance.rate = 0.9; // Slightly slower for clarity
-    utterance.pitch = 1.0;
+      const utterance = new SpeechSynthesisUtterance(text);
+      
+      // Try to find a good English voice
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoice = voices.find(v => 
+        v.lang.includes('en-IN') || v.lang.includes('en-GB') || v.lang.includes('en-US')
+      );
+      
+      if (preferredVoice) utterance.voice = preferredVoice;
+      utterance.rate = 1.0; 
+      utterance.pitch = 1.0;
 
-    window.speechSynthesis.speak(utterance);
+      utterance.onend = () => {
+        console.log("BROWSER_SPEECH: Playback ended.");
+        resolve();
+      };
+      
+      utterance.onerror = (event) => {
+        console.error("BROWSER_SPEECH: Error occurred:", event.error);
+        resolve();
+      };
+
+      window.speechSynthesis.speak(utterance);
+      
+      // Safety timeout: If it doesn't end within 30s, resolve anyway
+      setTimeout(resolve, 30000);
+    });
   };
 
   const detectSilence = (stream) => {
@@ -203,6 +309,17 @@ const VivaExamPage = () => {
 
   const startRecording = async () => {
     try {
+      // Stop any current audio before starting to record
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      
+      // Stop any ongoing browser speech synthesis
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaRecorderRef.current = new MediaRecorder(stream);
 
@@ -276,13 +393,14 @@ const VivaExamPage = () => {
       setIsProcessing(true);
       
       // Use the actual transcript if available, otherwise a default
-      const introText = localTranscript || "Introduction recorded.";
+      const introText = (localTranscript && localTranscript !== 'Listening...') ? localTranscript : "Introduction provided.";
       
+      console.log("INTRO_SUBMIT: Capturing introduction:", introText);
       setTranscript(introText);
       setChatHistory(prev => [...prev, { sender: 'user', text: introText, timestamp: new Date() }]);
       
       // Simulate a short processing delay for the intro
-      setTimeout(() => {
+      setTimeout(async () => {
         setIsProcessing(false);
         toast.success("Introduction received.");
         
@@ -290,13 +408,8 @@ const VivaExamPage = () => {
         setExamStage('exam');
         stageRef.current = 'exam';
         
-        // Play first question after a short delay
-        if (questions.length > 0) {
-          setTimeout(() => playAudio(questions[0].question_text, true), 1000);
-          // Auto-start recording for the first question after it's played
-          setTimeout(() => startRecording(), 4000);
-        }
-      }, 1000);
+        // The useEffect will handle playing the first question and starting recording
+      }, 1500);
     } else {
       // Handle Exam Question
       submitAnswer(audioBlob);
@@ -334,19 +447,20 @@ const VivaExamPage = () => {
 
   const submitAnswer = async (audioBlob) => {
     const formData = new FormData();
-    formData.append('audio_file', audioBlob, 'answer.webm');
+    if (audioBlob) {
+      formData.append('audio_file', audioBlob, 'answer.webm');
+    }
     formData.append('question_id', questions[currentQuestionIndex].id);
     
     // Capture the local transcript from ref
     const localUserText = transcriptRef.current;
-
-    if (localUserText) {
+    if (localUserText && localUserText !== 'Listening...') {
       formData.append('transcript', localUserText);
     }
 
     console.log("SUBMIT_ANSWER: Starting submission...");
-    console.log(`SUBMIT_ANSWER: Audio size: ${audioBlob.size} bytes`);
-    console.log(`SUBMIT_ANSWER: Local transcript: "${localUserText}"`);
+    if (audioBlob) console.log(`SUBMIT_ANSWER: Audio size: ${audioBlob.size} bytes`);
+    console.log(`SUBMIT_ANSWER: Local transcript used: "${localUserText}"`);
 
     try {
       console.log("SUBMIT_ANSWER: Sending POST request to /submit-answer");
@@ -361,17 +475,19 @@ const VivaExamPage = () => {
       
       console.log(`SUBMIT_ANSWER: Processed results -> Score: ${score}, Feedback: "${feedback}", Evaluation: ${evaluation}`);
       
-      // Prioritize server transcript, fallback to local transcript, then to default message
-      const finalUserText = serverText || localUserText || "(No speech detected)";
+      // Prioritize server transcript (if backend STT worked), fallback to local transcript
+      let finalUserText = serverText || localUserText;
+      if (!finalUserText || finalUserText === 'Listening...') {
+        finalUserText = "(No speech detected)";
+      }
       
       console.log(`SUBMIT_ANSWER: Final user text for chat: "${finalUserText}"`);
 
       setTranscript(finalUserText);
       setChatHistory(prev => {
-        // Prevent adding duplicate messages if the last message was already this transcript
+        // Prevent adding duplicate messages
         const lastMsg = prev[prev.length - 1];
         if (lastMsg && lastMsg.text === finalUserText && lastMsg.sender === 'user') {
-          console.log("SUBMIT_ANSWER: Duplicate message detected in chat history, skipping append.");
           return prev;
         }
         return [...prev, { sender: 'user', text: finalUserText, timestamp: new Date() }];
@@ -382,9 +498,9 @@ const VivaExamPage = () => {
         await playAudio(feedback, true); 
         setTimeout(() => {
           playAudio(questions[currentQuestionIndex].question_text, false);
-        }, 1500);
+        }, 2000);
         setFeedback(null);
-        setTimeout(() => startRecording(), 3000); 
+        setTimeout(() => startRecording(), 4000); 
       } else if (feedback && feedback.toLowerCase().includes("couldn't hear")) {
         // Handle "couldn't hear you" - play message and restart mic
         await playAudio(feedback, true);
@@ -394,29 +510,69 @@ const VivaExamPage = () => {
         setFeedback(res.data);
         let speechText = feedback;
         if (follow_up_hint) speechText += ". " + follow_up_hint;
-        playAudio(speechText, true);
+        await playAudio(speechText, true);
       }
     } catch (error) {
       console.error("Submission error:", error);
       toast.error('Failed to submit answer.');
+      setIsProcessing(false);
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const handleNextQuestion = () => {
+  const stopAllAudio = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  };
+
+  const handleReAnswer = async () => {
+    stopAllAudio();
+    // Clear the last AI message from chat history for this question so it replays
+    setChatHistory(prev => {
+      const lastMsg = prev[prev.length - 1];
+      if (lastMsg && lastMsg.sender === 'ai' && lastMsg.text === questions[currentQuestionIndex].question_text) {
+        return prev.slice(0, -1);
+      }
+      return prev;
+    });
+    setFeedback(null);
+    setTranscript('');
+    transcriptRef.current = '';
+    setIsQuestionSpoken(false);
+  };
+
+  const handleNextQuestion = async () => {
+    stopAllAudio();
     if (currentQuestionIndex < questions.length - 1) {
       const nextIndex = currentQuestionIndex + 1;
       setCurrentQuestionIndex(nextIndex);
       setTranscript('');
       setFeedback(null);
-      playAudio(questions[nextIndex].question_text, true);
+      setIsQuestionSpoken(false);
+      // The useEffect will handle playing the next question and recording
     } else {
       handleCompleteExam();
     }
   };
+  const enterFullscreen = (delay = 0) => {
+    setTimeout(() => {
+      const elem = document.documentElement;
+      if (!document.fullscreenElement && stageRef.current !== 'completed') {
+        elem.requestFullscreen().catch(() => {
+          console.log("Fullscreen request blocked. Interaction required.");
+        });
+      }
+    }, delay);
+  };
 
   const handleCompleteExam = async () => {
+    stopAllAudio();
     try {
       await api.post(`/viva-exams/${examId}/complete`);
       setExamStage('completed');
@@ -426,6 +582,90 @@ const VivaExamPage = () => {
       toast.error('Failed to finalize exam.');
     }
   };
+
+  useEffect(() => {
+    // Only monitor for cheating during the intro or actual exam
+    if (examStage === 'loading' || examStage === 'completed') return;
+
+    const handleViolation = (type) => {
+      // Avoid counting multiple times for the same 'away' event (e.g. blur + visibilitychange)
+      if (isAwayRef.current) return;
+      
+      // Secondary check: if visibility is actually visible, ignore window_blur (lenient for OS prompts)
+      if (document.visibilityState === 'visible' && type === 'window_blur') return;
+
+      isAwayRef.current = true;
+      violationCountRef.current += 1;
+      const currentStrikes = violationCountRef.current;
+      setWarningCount(currentStrikes);
+
+      
+      if (currentStrikes >= 3) {
+        toast.error("Security alert: 3rd violation detected. Submitting exam automatically.");
+        handleCompleteExam();
+        return;
+      }
+      toast.warning(`Security Warning (${currentStrikes}/3): Tab/Window switch detected. Return within 10 seconds or the exam will auto-submit.`);
+      
+      // Start the 10-second timer.
+      if (violationTimerRef.current) clearTimeout(violationTimerRef.current);
+      violationTimerRef.current = setTimeout(() => {
+        // Only submit if they are STILL away when the timer ends
+        if (isAwayRef.current) {
+          toast.error("Security alert: Inactivity timeout. Submitting exam.");
+          handleCompleteExam();
+        }
+      }, 10000);
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        handleViolation('tab_switch');
+      } else {
+        // User returned: clear timeout and recover fullscreen
+        isAwayRef.current = false;
+        if (violationTimerRef.current) {
+          clearTimeout(violationTimerRef.current);
+          violationTimerRef.current = null;
+        }
+        enterFullscreen(500);
+      }
+    };
+
+    const onWindowFocus = () => {
+      isAwayRef.current = false;
+      if (violationTimerRef.current) {
+        clearTimeout(violationTimerRef.current);
+        violationTimerRef.current = null;
+      }
+      enterFullscreen(500);
+    };
+
+    const onWindowBlur = () => handleViolation('window_blur');
+
+    const onFullscreenChange = () => {
+      // Exiting fullscreen is NOT a violation. Just try to re-enter after 3 seconds.
+      if (!document.fullscreenElement && stageRef.current !== 'completed') {
+        enterFullscreen(3000);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    window.addEventListener('blur', onWindowBlur);
+    window.addEventListener('focus', onWindowFocus);
+
+    // Try to enter fullscreen immediately when starting
+    if (examStage === 'intro' || examStage === 'exam') enterFullscreen();
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      window.removeEventListener('blur', onWindowBlur);
+      window.removeEventListener('focus', onWindowFocus);
+      if (violationTimerRef.current) clearTimeout(violationTimerRef.current);
+    };
+  }, [examStage]);
 
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -489,15 +729,15 @@ const VivaExamPage = () => {
         </div>
       </nav>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex h-[calc(100vh-64px)] min-h-0 overflow-hidden">
         {/* Left Sidebar - Chat History */}
-        <aside className="hidden lg:flex w-1/3 max-w-sm flex-col border-r border-border bg-card/30">
-          <div className="p-4 border-b border-border bg-muted/30">
+        <aside className="hidden lg:flex w-1/3 max-w-sm flex-col border-r border-border bg-card/30 min-h-0">
+          <div className="p-4 border-b border-border bg-muted/30 shrink-0">
             <h3 className="font-bold flex items-center gap-2 text-sm uppercase tracking-wider text-muted-foreground">
               <MessageSquare className="w-4 h-4" /> Live Transcript
             </h3>
           </div>
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4 custom-scrollbar">
             {chatHistory.map((msg, idx) => (
               <div key={idx} className={`flex gap-3 ${msg.sender === 'user' ? 'flex-row-reverse' : ''}`}>
                 <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
@@ -522,7 +762,7 @@ const VivaExamPage = () => {
         </aside>
 
         {/* Main Content - Right Side */}
-        <main className="flex-1 flex flex-col relative overflow-y-auto">
+        <main className="flex-1 flex flex-col relative overflow-hidden min-h-0">
           {/* Progress Bar */}
           <div className="h-1 w-full bg-muted shrink-0">
             <div 
@@ -531,7 +771,7 @@ const VivaExamPage = () => {
             ></div>
           </div>
 
-          <div className="flex-1 max-w-3xl w-full mx-auto p-6 lg:p-10 flex flex-col gap-8">
+          <div className="flex-1 max-w-3xl w-full mx-auto p-6 lg:p-10 flex flex-col gap-8 custom-scrollbar overflow-hidden">
         {/* Content Area */}
         {examStage === 'intro' ? (
           <div className="bg-card border border-border rounded-[2.5rem] p-8 lg:p-12 shadow-xl shadow-primary/5 animate-fade-in relative overflow-hidden text-center">
@@ -548,7 +788,10 @@ const VivaExamPage = () => {
               </p>
               <Button 
                 variant="outline" 
-                onClick={() => playAudio("Hello. I am your AI examiner. Before we begin the questions, please briefly introduce yourself.", false)}
+                onClick={() => {
+                  const welcomeText = `Welcome to your ${exam?.exam_name || 'Viva'} session. I am your AI examiner. Before we begin the questions, please briefly introduce yourself. Mention your name and student ID for verification.`;
+                  playAudio(welcomeText, false);
+                }}
                 className="rounded-xl gap-2 font-bold border-2 hover:bg-muted mt-4"
               >
                 <Volume2 className="w-4 h-4" /> Replay Instructions
@@ -643,7 +886,14 @@ const VivaExamPage = () => {
                 </div>
               </div>
 
-              <div className="flex justify-center">
+              <div className="flex justify-center gap-4">
+                <Button 
+                  onClick={handleReAnswer}
+                  variant="outline"
+                  className="h-14 px-8 rounded-2xl font-bold text-lg border-2 hover:bg-muted"
+                >
+                  Re-answer
+                </Button>
                 <Button 
                   onClick={handleNextQuestion}
                   className="bg-brand-gradient text-white h-14 px-12 rounded-2xl font-bold text-lg shadow-xl shadow-primary/20 btn-hover gap-2"

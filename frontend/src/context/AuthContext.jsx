@@ -17,16 +17,23 @@ export const AuthProvider = ({ children }) => {
 
       if (storedUser && storedAccessToken && storedRefreshToken) {
         try {
-          const parsedUser = JSON.parse(storedUser);
-          setUser(parsedUser);
-          // Attempt to fetch college data if admin
-          if (parsedUser.role === 'college_admin') {
+          // Fetch latest user data from server instead of relying on localStorage
+          const meRes = await api.get('/auth/me');
+          const userData = meRes.data;
+          
+          setUser(userData);
+          localStorage.setItem('user', JSON.stringify(userData)); // Sync local storage
+
+          // Attempt to fetch college data if admin or teacher
+          if (userData.role === 'college_admin' || userData.role === 'teacher') {
             const res = await api.get('/colleges/my');
             setCollege(res.data);
           }
         } catch (error) {
-          console.error("Failed to parse stored user or fetch college data:", error);
-          logout(); // Clear invalid data
+          console.error("Failed to fetch current user or college data:", error);
+          // If we fail to fetch, still try to use stored data but log the error
+          const parsedUser = JSON.parse(storedUser);
+          setUser(parsedUser);
         }
       }
       setLoading(false);
@@ -44,7 +51,7 @@ export const AuthProvider = ({ children }) => {
       localStorage.setItem('user', JSON.stringify(userData));
       setUser(userData);
 
-      if (userData.role === 'college_admin') {
+      if (userData.role === 'college_admin' || userData.role === 'teacher') {
         try {
           const res = await api.get('/colleges/my');
           setCollege(res.data);

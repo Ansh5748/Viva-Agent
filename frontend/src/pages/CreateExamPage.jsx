@@ -63,6 +63,17 @@ const CreateExamPage = () => {
         const uniqueBatches = [...new Set(stuRes.data.map(s => s.batch).filter(Boolean))];
         setBatches(uniqueBatches.map(b => ({ value: b, label: b })));
 
+        // If teacher with assigned subject, pre-select it
+        if (user.role === 'teacher' && user.teacher_profile?.subject) {
+          const teacherSub = user.teacher_profile.subject;
+          setFormData(prev => ({ ...prev, selected_subject: teacherSub }));
+          
+          // Filter topics for this subject
+          const subjectQs = qRes.data.filter(q => (q.subject || 'General') === teacherSub);
+          const uniqueTopics = [...new Set(subjectQs.map(q => q.topic || 'General'))];
+          setTopics(uniqueTopics.map(t => ({ value: t, label: t })));
+        }
+
       } catch (error) {
         toast.error('Failed to load initial data.');
       }
@@ -238,6 +249,8 @@ const CreateExamPage = () => {
                 <Label className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Subject</Label>
                 <Select
                   options={subjects}
+                  value={subjects.find(s => s.value === formData.selected_subject)}
+                  isDisabled={user.role === 'teacher' && !!user.teacher_profile?.subject}
                   onChange={handleSubjectSelect}
                   placeholder="Select Subject..."
                   classNamePrefix="react-select"

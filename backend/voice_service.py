@@ -13,9 +13,8 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 logger = logging.getLogger(__name__)
 
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
-GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
-
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
 
 class VoiceService:
@@ -25,6 +24,10 @@ class VoiceService:
         if not GOOGLE_API_KEY:
             raise ValueError("GEMINI_API_KEY environment variable not set.")
         
+        # Masked API key for logging
+        masked_key = f"{GOOGLE_API_KEY[:4]}...{GOOGLE_API_KEY[-4:]}" if len(GOOGLE_API_KEY) > 8 else "****"
+        logger.info(f"Initializing VoiceService with Gemini API Key: {masked_key}")
+        
         self.elevenlabs = AsyncElevenLabs(api_key=ELEVENLABS_API_KEY)
         genai.configure(api_key=GOOGLE_API_KEY)
         
@@ -32,20 +35,59 @@ class VoiceService:
         try:
             logger.info("Listing available models from google-generativeai...")
             available_models = []
+            # Try to list models to see what's actually allowed for this key
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
                     available_models.append(m.name)
-            logger.info(f"Available Models: {available_models}")
+            
+            if not available_models:
+                logger.warning("No models found via genai.list_models(). This might indicate an API key or permission issue.")
+                # Check a specific common model directly
+                try:
+                    m = genai.get_model('models/gemini-1.5-flash')
+                    logger.info(f"Successfully retrieved model info for 'models/gemini-1.5-flash' directly: {m.display_name}")
+                    available_models.append('models/gemini-1.5-flash')
+                except Exception as get_e:
+                    logger.error(f"Failed to get 'models/gemini-1.5-flash' directly: {str(get_e)}")
+            else:
+                logger.info(f"Available Models found: {available_models}")
+            
+            # We will use these models in this priority order. 
+            # We mix 'models/' prefix and no prefix to cover all SDK behaviors.
+            self.model_names = [
+                'gemini-1.5-flash-latest',
+                'gemini-1.5-pro-latest',
+                'gemini-1.5-flash',
+                'gemini-1.5-pro',
+                'gemini-1.0-pro',
+                'models/gemini-1.5-flash-latest',
+                'models/gemini-1.5-pro-latest',
+                'models/gemini-1.5-flash',
+                'models/gemini-1.5-pro',
+                'models/gemini-1.0-pro'
+            ]
+            
+            # If list_models returned something, prepend it to our list to prioritize it
+            for m in reversed(available_models):
+                if m not in self.model_names:
+                    self.model_names.insert(0, m)
+                else:
+                    # Move to front
+                    self.model_names.remove(m)
+                    self.model_names.insert(0, m)
+                    
         except Exception as e:
             logger.error(f"Failed to list models during init: {str(e)}")
+            self.model_names = [
+                'gemini-1.5-flash',
+                'gemini-1.5-pro',
+                'gemini-1.0-pro',
+                'models/gemini-1.5-flash',
+                'models/gemini-1.5-pro',
+                'models/gemini-1.0-pro'
+            ]
 
-        # We'll try these models in order
-        self.model_names = [
-            'gemini-1.5-flash',
-            'gemini-1.5-pro',
-            'gemini-1.0-pro'
-        ]
-        logger.info("VoiceService initialized with multi-model fallback support.")
+        logger.info(f"VoiceService initialized with model fallback list: {self.model_names}")
     
     async def transcribe_audio(self, audio_bytes: bytes, language: str = "en") -> str:
         try:
@@ -77,6 +119,7 @@ class VoiceService:
                     try:
                         logger.info(f"TRANSCRIPTION: Trying Gemini model: {m_name}")
                         model = genai.GenerativeModel(m_name)
+                        # Ensure we use the right format for multimodal
                         response = await model.generate_content_async([prompt, audio_content])
                         if response and response.text:
                             text = response.text.strip()
@@ -156,15 +199,19 @@ class VoiceService:
             if start != -1 and end != -1:
                 cleaned_text = cleaned_text[start:end+1]
                 
-            return json.loads(cleaned_text)
+            parsed = json.loads(cleaned_text)
+            # Ensure required keys exist
+            if "score" not in parsed: parsed["score"] = 0.0
+            if "feedback" not in parsed: parsed["feedback"] = "I've received your answer."
+            if "evaluation" not in parsed: parsed["evaluation"] = "incorrect"
+            return parsed
         except Exception as e:
             logger.error(f"Failed to parse Gemini JSON: {str(e)}. Original text: {text}")
-            # Return a minimal valid structure to prevent crashes
             return {
                 "score": 0.0,
                 "feedback": "Technical error parsing evaluation.",
                 "evaluation": "incorrect",
-                "intent": "unknown"
+                "intent": "answer"
             }
 
     async def evaluate_answer(
@@ -176,9 +223,12 @@ class VoiceService:
     ) -> Dict[str, Any]:
         logger.info(f"EVALUATION START: Question='{question[:50]}...', Answer='{student_answer[:50]}...'")
         
-        # Handle empty or invalid student answer early
-        if not student_answer or student_answer.strip() in ["", "Listening...", "Processing...", "(No speech detected)"]:
-            logger.warning("EVALUATION: Student answer is empty or invalid.")
+        # Clean up student answer
+        clean_answer = student_answer.strip() if student_answer else ""
+        invalid_markers = ["", "Listening...", "Processing...", "(No speech detected)", "Introduction recorded.", "Introduction provided."]
+        
+        if not clean_answer or clean_answer in invalid_markers:
+            logger.warning(f"EVALUATION: Student answer is invalid: '{clean_answer}'")
             return {
                 "score": 0.0,
                 "feedback": "I couldn't hear your answer clearly. Could you please repeat it?",
@@ -190,116 +240,118 @@ class VoiceService:
             # 1. Intent Detection
             intent_prompt = f"""Analyze the student's response in a viva exam context.
 Question asked: {question}
-Student's response: {student_answer}
+Student's response: {clean_answer}
 
-Identify the intent of the student. Is it:
-1. "answer": Providing an answer to the question.
-2. "repeat": Asking to repeat the question.
-3. "clarify": Asking for clarification or help understanding the question.
-4. "unknown": None of the above.
-
-Respond in this exact JSON format:
+Identify the student's intent. Return ONLY a JSON object with this exact structure:
 {{
-    "intent": "answer" | "repeat" | "clarify" | "unknown"
-}}"""
-            
-            intent = "answer" # Default intent
+  "intent": "answer" | "repeat" | "clarify" | "unknown"
+}}
+"""
+            intent = "answer"
+            intent_detected = False
             for m_name in self.model_names:
                 try:
                     logger.info(f"INTENT: Trying model {m_name}")
                     model = genai.GenerativeModel(m_name)
-                    response = await model.generate_content_async(
-                        intent_prompt,
-                        generation_config={"response_mime_type": "application/json"}
-                    )
-                    
+                    # We'll use generate_content instead of async to see if it makes a difference in error handling
+                    # but since we are in an async function, let's keep it async but add a shorter timeout if possible
+                    response = await model.generate_content_async(intent_prompt, generation_config={"response_mime_type": "application/json"})
                     if response and response.text:
-                        intent_data = self._parse_gemini_json(response.text)
-                        intent = intent_data.get("intent", "answer")
-                        logger.info(f"INTENT: Success ({m_name}): {intent}")
+                        parsed = self._parse_gemini_json(response.text)
+                        intent = parsed.get("intent", "answer")
+                        logger.info(f"INTENT: Model {m_name} detected intent: {intent}")
+                        intent_detected = True
                         break
-                except Exception as intent_e:
-                    logger.error(f"INTENT: Model {m_name} failed: {str(intent_e)}")
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"INTENT: Model {m_name} failed: {error_msg}")
+                    if "404" in error_msg:
+                        continue # Try next model
+                    # If it's something else like quota, we might want to stop
                     continue
+            
+            if not intent_detected:
+                logger.warning("INTENT: All models failed to detect intent. Defaulting to 'answer'.")
 
-            if intent in ["repeat", "clarify"]:
+            # 2. Handle System Actions (Repeat/Clarify)
+            if intent == "repeat":
                 return {
                     "score": 0.0,
-                    "feedback": "Repeating the question..." if intent == "repeat" else "Let me clarify the question for you.",
-                    "evaluation": intent,
+                    "feedback": "No problem. Let me repeat the question for you: " + question,
+                    "evaluation": "repeat",
+                    "is_system_action": True
+                }
+            elif intent == "clarify":
+                return {
+                    "score": 0.0,
+                    "feedback": "I understand. This question is asking about " + question + ". Try your best to explain it in your own words.",
+                    "evaluation": "clarify",
                     "is_system_action": True
                 }
 
-            # 2. Answer Evaluation
-            prompt = f"""You are a professional, senior college professor conducting a rigorous yet fair viva exam.
-Your goal is to evaluate the student's technical understanding and provide academic feedback.
+            # 3. Evaluation
+            eval_prompt = f"""You are a Senior College Professor conducting a Viva exam. 
+Question: {question}
+Answer Key Reference: {answer_key}
+Student's Answer: {clean_answer}
 
-Question Asked: {question}
-Reference Answer (Key Points): {answer_key}
-Student's Response: {student_answer}
+Evaluate the student's answer with LENIENT and ENCOURAGING scoring. 
 
-Evaluation Rubric:
-1. Accuracy: How technically correct is the student's explanation?
-2. Depth: Does the student demonstrate a deep understanding?
-3. Conciseness: Is the student's answer direct and clear?
+Rules for Evaluation:
+1. LENIENT SCORING: Be generous with marks. If the student has the right idea, give them high marks (e.g., 8-10). 
+2. STT ERROR TOLERANCE: Speech-to-text (STT) can sometimes mishear words (e.g., "prong" instead of "prompt"). If you see a word that sounds similar to a technical term or makes sense in context, assume the student said the correct word. DO NOT penalize for spelling or phonetic mismatches from the STT.
+3. INTENT OVER PERFECTION: Focus on whether the student understands the core concept. Even if the explanation is slightly messy or incomplete, if the core intent is correct, give full or near-full marks.
+4. FEEDBACK: Provide positive, constructive, and encouraging feedback (1-2 sentences). 
 
-Grading Scale (0-10):
-- 9-10: Excellent. Comprehensive, accurate, and well-articulated.
-- 7-8: Good. Accurate but might miss minor nuances or depth.
-- 5-6: Fair. Basic understanding but significant omissions or lack of clarity.
-- 0-4: Poor/Incorrect. Fundamental misconceptions or no relevant content.
+Scoring Scale:
+- 9.0 - 10.0: Core concept is understood (even if STT has minor errors).
+- 7.0 - 8.5: Mostly correct but missing some details.
+- 5.0 - 6.5: Partially correct or shows some basic understanding.
+- Below 5.0: Only if the answer is completely unrelated or empty.
 
-Your feedback must be academic, direct, and helpful.
-
-Respond in this exact JSON format:
+Return ONLY a JSON object:
 {{
-    "score": <number 0.0 to 10.0>,
-    "feedback": "<formal academic feedback as a professor>",
-    "evaluation": "correct" | "partially_correct" | "incorrect",
-    "follow_up_hint": "<optional: a short academic hint if they missed a specific point>"
-}}"""
-            
+  "score": float,
+  "feedback": "string",
+  "evaluation": "correct" | "partially_correct" | "incorrect",
+  "follow_up_hint": "string"
+}}
+"""
             for m_name in self.model_names:
                 try:
                     logger.info(f"EVALUATION: Trying model {m_name}")
                     model = genai.GenerativeModel(m_name)
-                    response = await model.generate_content_async(
-                        prompt,
-                        generation_config={"response_mime_type": "application/json"}
-                    )
-                    
+                    response = await model.generate_content_async(eval_prompt, generation_config={"response_mime_type": "application/json"})
                     if response and response.text:
                         result = self._parse_gemini_json(response.text)
-                        logger.info(f"EVALUATION: Success ({m_name}): score={result.get('score')}")
+                        score = float(result.get("score", 0.0))
+                        feedback = result.get("feedback", "Good effort.")
+                        eval_status = result.get("evaluation", "incorrect")
+                        hint = result.get("follow_up_hint", "")
                         
+                        logger.info(f"EVALUATION: Model {m_name} success: Score={score}")
                         return {
-                            "score": float(result.get("score", 0)),
-                            "feedback": result.get("feedback", ""),
-                            "evaluation": result.get("evaluation", "incorrect"),
-                            "follow_up_hint": result.get("follow_up_hint", ""),
+                            "score": score,
+                            "feedback": feedback,
+                            "evaluation": eval_status,
+                            "follow_up_hint": hint,
                             "is_system_action": False
                         }
-                except Exception as eval_e:
-                    logger.error(f"EVALUATION: Model {m_name} failed: {str(eval_e)}")
+                except Exception as e:
+                    logger.error(f"EVALUATION: Model {m_name} failed: {str(e)}")
                     continue
 
-            # Final Fallback if everything fails
             logger.error("EVALUATION: All models failed.")
+            raise Exception("All Gemini models failed during evaluation.")
+
+        except Exception as e:
+            logger.error(f"EVALUATION: Final fallback triggered: {str(e)}")
             return {
                 "score": 0.0,
                 "feedback": "I've received your answer. Let's move to the next question as I'm having a bit of trouble processing the evaluation right now.",
-                "evaluation": "partially_correct",
-                "follow_up_hint": "",
-                "is_system_action": False
-            }
-
-        except Exception as e:
-            logger.error(f"EVALUATION: Critical error: {str(e)}")
-            return {
-                "score": 0.0,
-                "feedback": "I'm sorry, I'm having some technical difficulties processing your answer.",
                 "evaluation": "incorrect",
-                "is_system_action": False
+                "is_system_action": False,
+                "follow_up_hint": ""
             }
 
 

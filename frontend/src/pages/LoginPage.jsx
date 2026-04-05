@@ -24,7 +24,7 @@ const LoginPage = () => {
 
       if (user.role === 'global_admin') {
         navigate('/admin/dashboard');
-      } else if (user.role === 'college_admin') {
+      } else if (user.role === 'college_admin' || user.role === 'teacher') {
         navigate('/college/dashboard');
       } else if (user.role === 'student') {
         navigate('/student/dashboard');

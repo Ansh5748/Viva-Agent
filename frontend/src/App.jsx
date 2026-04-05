@@ -43,10 +43,10 @@ function App() {
             <Route path="/reset-password" element={<ResetPasswordPage />} />
 
             {/* Protected Routes */}
-            <Route path="/college/dashboard" element={<ProtectedRoute allowedRoles={['college_admin']}><CollegeDashboard /></ProtectedRoute>} />
+            <Route path="/college/dashboard" element={<ProtectedRoute allowedRoles={['college_admin', 'teacher']}><CollegeDashboard /></ProtectedRoute>} />
             <Route path="/student/dashboard" element={<ProtectedRoute allowedRoles={['student']}><StudentDashboard /></ProtectedRoute>} />
             <Route path="/admin/dashboard" element={<ProtectedRoute allowedRoles={['global_admin']}><AdminDashboard /></ProtectedRoute>} />
-            <Route path="/create-exam" element={<ProtectedRoute allowedRoles={['college_admin']}><CreateExamPage /></ProtectedRoute>} />
+            <Route path="/create-exam" element={<ProtectedRoute allowedRoles={['college_admin', 'teacher']}><CreateExamPage /></ProtectedRoute>} />
             <Route path="/viva/:examId" element={<ProtectedRoute allowedRoles={['student']}><VivaExamPage /></ProtectedRoute>} />
             <Route path="/subscribe" element={<ProtectedRoute allowedRoles={['college_admin']}><SubscriptionPage /></ProtectedRoute>} />
           </Routes>

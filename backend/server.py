@@ -26,7 +26,7 @@ from models import (
     Question, QuestionBankUpload, ExamSet, ExamSetCreate, ExamSetUpdate, VivaExam,
     QARecord, AnswerSubmission, VoiceInteraction, TranscribeRequest,
     UserRole, SubscriptionStatus, PaymentMethod, DifficultyLevel, ExamStatus,
-    ExamConfig
+    ExamConfig, Teacher, TeacherCreate, TeacherUpdate, TeacherPermissions
 )
 from auth import (
     hash_password, verify_password, create_access_token, create_refresh_token,
@@ -50,7 +50,18 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "#PSTDG5748")
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "/app/backend/uploads"))
 UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 
+from fastapi.exceptions import RequestValidationError
+
 app = FastAPI(title="College Viva Voice-Agent Platform API")
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    logger.error(f"Validation error: {exc.errors()}")
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": exc.errors()},
+    )
+
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
 
@@ -140,6 +151,11 @@ async def login(user_login: UserLogin):
         if college_data:
             user_response["college_name"] = college_data.get("name")
 
+    if user.role == UserRole.TEACHER:
+        teacher_data = await db.teachers.find_one({"user_id": user.id}, {"_id": 0})
+        if teacher_data:
+            user_response["teacher_profile"] = teacher_data
+
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
@@ -219,7 +235,36 @@ async def get_current_user_dep(
             detail="User not found"
         )
     
-    return User(**user_data)
+    user = User(**user_data)
+    
+    # If teacher, attach teacher profile
+    if user.role == UserRole.TEACHER:
+        teacher_data = await database.teachers.find_one({"user_id": user.id}, {"_id": 0})
+        if teacher_data:
+            user.full_name = teacher_data["full_name"] # Ensure it's in sync
+            # We can't easily attach it to the User model without modifying the Pydantic class,
+            # but we can check it in the endpoints.
+            pass
+            
+    return user
+
+
+@api_router.get("/auth/me")
+async def get_me(current_user: User = Depends(get_current_user_dep)):
+    user_response = current_user.model_dump()
+    user_response.pop("password_hash", None)
+    
+    if current_user.college_id:
+        college_data = await db.colleges.find_one({"id": current_user.college_id}, {"_id": 0, "name": 1})
+        if college_data:
+            user_response["college_name"] = college_data.get("name")
+
+    if current_user.role == UserRole.TEACHER:
+        teacher_data = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if teacher_data:
+            user_response["teacher_profile"] = teacher_data
+            
+    return user_response
 
 
 @api_router.post("/colleges/create", response_model=College)
@@ -286,13 +331,19 @@ async def create_college(college_create: CollegeCreate):
 
 @api_router.get("/colleges/my")
 async def get_my_college(current_user: User = Depends(get_current_user_dep)):
-    if current_user.role not in [UserRole.COLLEGE_ADMIN]:
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only college admins can access this"
+            detail="Only college admins and teachers can access this"
         )
     
-    college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
+    query = {}
+    if current_user.role == UserRole.COLLEGE_ADMIN:
+        query = {"admin_id": current_user.id}
+    else:
+        query = {"id": current_user.college_id}
+
+    college_data = await db.colleges.find_one(query, {"_id": 0})
     if not college_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -518,20 +569,34 @@ async def bulk_upload_students(
 
 @api_router.get("/students/my-college")
 async def get_college_students(current_user: User = Depends(get_current_user_dep)):
-    if current_user.role != UserRole.COLLEGE_ADMIN:
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only college admins can access this"
+            detail="Only college admins and teachers can access this"
         )
     
-    college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
-    if not college_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="College not found"
-        )
+    college_id = current_user.college_id
+    if current_user.role == UserRole.COLLEGE_ADMIN:
+        college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
+        if not college_data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="College not found")
+        college_id = college_data["id"]
     
-    students = await db.students.find({"college_id": college_data["id"]}, {"_id": 0}).to_list(1000)
+    query = {"college_id": college_id}
+    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or "student_data" not in teacher["permissions"]:
+            return [] # No permission to see student data at all
+        
+        batches = teacher["permissions"].get("student_data", [])
+        if not batches:
+            return [] # Has permission but no batches assigned
+            
+        if "all" not in batches:
+            query["batch"] = {"$in": batches}
+            
+    students = await db.students.find(query, {"_id": 0}).to_list(1000)
     return students
 
 
@@ -549,6 +614,140 @@ async def delete_student(student_id: str, current_user: User = Depends(get_curre
     await db.users.delete_one({"id": student["user_id"]})
     
     return {"message": "Student deleted"}
+
+
+@api_router.post("/teachers/create", response_model=Teacher)
+async def create_teacher(
+    teacher_create: TeacherCreate,
+    current_user: User = Depends(get_current_user_dep)
+):
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or not teacher["permissions"].get("manage_teachers"):
+            raise HTTPException(status_code=403, detail="No permission to manage teachers")
+    
+    college_data = await db.colleges.find_one({"id": current_user.college_id}, {"_id": 0})
+    if not college_data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="College not found"
+        )
+    
+    existing_user = await db.users.find_one({"email": teacher_create.email}, {"_id": 0})
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Create User for Teacher
+    user = User(
+        email=teacher_create.email,
+        password_hash=hash_password(teacher_create.password),
+        role=UserRole.TEACHER,
+        full_name=teacher_create.full_name,
+        college_id=college_data["id"]
+    )
+    
+    user_dict = user.model_dump()
+    user_dict['created_at'] = user_dict['created_at'].isoformat()
+    user_dict['updated_at'] = user_dict['updated_at'].isoformat()
+    await db.users.insert_one(user_dict)
+    
+    # Create Teacher Profile
+    teacher = Teacher(
+        college_id=college_data["id"],
+        user_id=user.id,
+        full_name=teacher_create.full_name,
+        email=teacher_create.email,
+        subject=teacher_create.subject,
+        permissions=teacher_create.permissions,
+        password=teacher_create.password # Stored temporarily for initial view
+    )
+    
+    teacher_dict = teacher.model_dump()
+    teacher_dict['created_at'] = teacher_dict['created_at'].isoformat()
+    await db.teachers.insert_one(teacher_dict)
+    
+    return teacher
+
+
+@api_router.get("/teachers/my-college", response_model=List[Teacher])
+async def get_college_teachers(current_user: User = Depends(get_current_user_dep)):
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or not teacher["permissions"].get("manage_teachers"):
+            raise HTTPException(status_code=403, detail="No permission to manage teachers")
+    
+    teachers = await db.teachers.find({"college_id": current_user.college_id}, {"_id": 0}).to_list(1000)
+    return teachers
+
+
+@api_router.patch("/teachers/{teacher_id}", response_model=Teacher)
+async def update_teacher(
+    teacher_id: str,
+    teacher_update: TeacherUpdate,
+    current_user: User = Depends(get_current_user_dep)
+):
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or not teacher["permissions"].get("manage_teachers"):
+            raise HTTPException(status_code=403, detail="No permission to manage teachers")
+    
+    teacher_data = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+    if not teacher_data:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+        
+    update_dict = teacher_update.model_dump(exclude_unset=True)
+    
+    if "password" in update_dict:
+        password_raw = update_dict.pop("password")
+        await db.users.update_one(
+            {"id": teacher_data["user_id"]},
+            {"$set": {"password_hash": hash_password(password_raw)}}
+        )
+        update_dict["password"] = password_raw # Update temporarily stored password
+
+    if "full_name" in update_dict:
+        await db.users.update_one(
+            {"id": teacher_data["user_id"]},
+            {"$set": {"full_name": update_dict["full_name"]}}
+        )
+
+    if update_dict:
+        await db.teachers.update_one({"id": teacher_id}, {"$set": update_dict})
+    
+    updated_teacher = await db.teachers.find_one({"id": teacher_id}, {"_id": 0})
+    return updated_teacher
+
+
+@api_router.delete("/teachers/{teacher_id}")
+async def delete_teacher(teacher_id: str, current_user: User = Depends(get_current_user_dep)):
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or not teacher["permissions"].get("manage_teachers"):
+            raise HTTPException(status_code=403, detail="No permission to manage teachers")
+    
+    teacher = await db.teachers.find_one({"id": teacher_id})
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+        
+    await db.teachers.delete_one({"id": teacher_id})
+    await db.users.delete_one({"id": teacher["user_id"]})
+    
+    return {"message": "Teacher deleted"}
 
 
 @api_router.post("/questions/bulk-upload")
@@ -628,20 +827,30 @@ async def bulk_upload_questions(
 
 @api_router.get("/questions/my-college")
 async def get_college_questions(current_user: User = Depends(get_current_user_dep)):
-    if current_user.role != UserRole.COLLEGE_ADMIN:
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only college admins can access this"
+            detail="Only college admins and teachers can access this"
         )
     
-    college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
-    if not college_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="College not found"
-        )
+    college_id = current_user.college_id
+    if current_user.role == UserRole.COLLEGE_ADMIN:
+        college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
+        if not college_data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="College not found")
+        college_id = college_data["id"]
     
-    questions = await db.questions.find({"college_id": college_data["id"]}, {"_id": 0}).to_list(1000)
+    query = {"college_id": college_id}
+    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or not teacher["permissions"].get("question_bank"):
+            return [] # Return empty list instead of 403
+        
+        if teacher.get("subject"):
+            query["subject"] = teacher["subject"]
+            
+    questions = await db.questions.find(query, {"_id": 0}).to_list(1000)
     return questions
 
 
@@ -662,29 +871,34 @@ async def create_exam_set(
     exam_set_create: ExamSetCreate,
     current_user: User = Depends(get_current_user_dep)
 ):
-    if current_user.role != UserRole.COLLEGE_ADMIN:
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only college admins can create exam sets"
+            detail="Only college admins and teachers can create exam sets"
         )
     
-    college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
-    if not college_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="College not found"
-        )
+    college_id = current_user.college_id
+    if current_user.role == UserRole.COLLEGE_ADMIN:
+        college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
+        if not college_data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="College not found")
+        college_id = college_data["id"]
     
-    college = College(**college_data)
-    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or not teacher["permissions"].get("exam_set"):
+            raise HTTPException(status_code=403, detail="No permission to create exam sets")
+        
+        # Teacher must use their assigned subject if one is set
+        if teacher.get("subject") and exam_set_create.selected_subject != teacher["subject"]:
+             raise HTTPException(status_code=403, detail=f"You can only create exams for {teacher['subject']}")
+
     end_time = exam_set_create.end_time
     if not end_time:
-        # If end_time is not provided, calculate it based on start_time and exam duration.
-        # This sets the grace period to start the exam.
         end_time = exam_set_create.start_time + timedelta(minutes=exam_set_create.exam_config.duration_minutes)
 
     exam_set = ExamSet(
-        college_id=college.id,
+        college_id=college_id,
         name=exam_set_create.name,
         exam_config=exam_set_create.exam_config,
         selected_subject=exam_set_create.selected_subject,
@@ -723,21 +937,31 @@ async def create_exam_set(
 
 @api_router.get("/exam-sets/my-college")
 async def get_college_exam_sets(current_user: User = Depends(get_current_user_dep)):
-    if current_user.role != UserRole.COLLEGE_ADMIN:
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only college admins can access this"
+            detail="Only college admins and teachers can access this"
         )
     
-    college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
-    if not college_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="College not found"
-        )
+    college_id = current_user.college_id
+    if current_user.role == UserRole.COLLEGE_ADMIN:
+        college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
+        if not college_data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="College not found")
+        college_id = college_data["id"]
     
-    exam_sets = await db.exam_sets.find({"college_id": college_data["id"]}, {"_id": 0}).to_list(1000)
-    return exam_sets
+    query = {"college_id": college_id}
+    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or not teacher["permissions"].get("exam_set"):
+            return [] # Return empty list instead of 403
+        
+        if teacher.get("subject"):
+            query["selected_subject"] = teacher["subject"]
+            
+    exam_sets = await db.exam_sets.find(query, {"_id": 0}).to_list(1000)
+    return exam_sets[::-1] # Reverse to show latest first as per previous request
 
 @api_router.delete("/exam-sets/{exam_set_id}")
 async def delete_exam_set(
@@ -766,10 +990,10 @@ async def get_exam_set_details(
     exam_set_id: str,
     current_user: User = Depends(get_current_user_dep)
 ):
-    if current_user.role != UserRole.COLLEGE_ADMIN:
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only college admins can access this"
+            detail="Only college admins and teachers can access this"
         )
 
     exam_set_data = await db.exam_sets.find_one({"id": exam_set_id, "college_id": current_user.college_id}, {"_id": 0})
@@ -778,6 +1002,14 @@ async def get_exam_set_details(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Exam set not found or you do not have permission to view it."
         )
+    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or not teacher["permissions"].get("exam_set"):
+            raise HTTPException(status_code=403, detail="No permission to view exam sets")
+        
+        if teacher.get("subject") and exam_set_data.get("selected_subject") != teacher["subject"]:
+            raise HTTPException(status_code=403, detail="You do not have permission to view this exam set")
 
     # Get student details
     student_ids = exam_set_data.get("student_ids", [])
@@ -810,10 +1042,10 @@ async def update_exam_set(
     exam_set_update: ExamSetUpdate,
     current_user: User = Depends(get_current_user_dep)
 ):
-    if current_user.role != UserRole.COLLEGE_ADMIN:
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only college admins can update exam sets"
+            detail="Only college admins and teachers can update exam sets"
         )
 
     existing_exam_set_data = await db.exam_sets.find_one({
@@ -825,6 +1057,14 @@ async def update_exam_set(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Exam set not found"
         )
+    
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or not teacher["permissions"].get("exam_set"):
+            raise HTTPException(status_code=403, detail="No permission to update exam sets")
+        
+        if teacher.get("subject") and existing_exam_set_data.get("selected_subject") != teacher["subject"]:
+            raise HTTPException(status_code=403, detail="You do not have permission to update this exam set")
 
     # Prevent updates if any student has started the exam
     in_progress_vivas = await db.viva_exams.count_documents({
@@ -939,6 +1179,8 @@ async def get_my_exams(current_user: User = Depends(get_current_user_dep)):
                 exam["start_time"] = exam_set.get("start_time")
                 exam["end_time"] = exam_set.get("end_time")
                 exam["duration_minutes"] = exam_set.get("exam_config", {}).get("duration_minutes")
+        # Ensure 'score' is available for the frontend, using total_score
+        exam["score"] = exam.get("total_score", 0)
     return exams
 
 
@@ -996,6 +1238,28 @@ async def start_viva_exam(
             detail="The time to start this exam has passed. Please contact your administrator."
         )
     
+    if exam.status == ExamStatus.IN_PROGRESS:
+        # Restore already selected questions if they exist
+        if exam_data.get("selected_questions"):
+            # Get the questions in the correct order
+            questions_cursor = db.questions.find({"id": {"$in": exam_data["selected_questions"]}}, {"_id": 0})
+            questions_list = await questions_cursor.to_list(length=None)
+            
+            # Reorder them to match the original selection
+            questions_map = {q["id"]: q for q in questions_list}
+            selected_questions = [questions_map[qid] for qid in exam_data["selected_questions"] if qid in questions_map]
+            
+            # Count how many have been answered
+            answered_count = await db.qa_records.count_documents({"viva_exam_id": exam_id})
+            
+            return {
+                "message": "Resuming exam",
+                "questions": selected_questions,
+                "duration_minutes": exam_set.exam_config.duration_minutes,
+                "status": "in_progress",
+                "answered_count": answered_count
+            }
+
     # Fetch questions based on subject and topics
     query = {"college_id": exam.college_id}
     if exam_set.selected_subject:
@@ -1055,7 +1319,9 @@ async def start_viva_exam(
     return {
         "message": "Exam started",
         "questions": selected_questions,
-        "duration_minutes": config.duration_minutes
+        "duration_minutes": config.duration_minutes,
+        "exam_name": exam_set.name,
+        "status": ExamStatus.IN_PROGRESS.value
     }
 
 
@@ -1130,6 +1396,7 @@ async def submit_answer(
         answer_key=question.answer_key,
         score=evaluation["score"],
         max_score=10.0,
+        evaluation=evaluation,
         transcript=student_answer
     )
     
@@ -1206,8 +1473,21 @@ async def get_exam_report(
         if exam_data["college_id"] != current_user.college_id:
             raise HTTPException(status_code=403, detail="Not authorized")
     
-    # Fetch QA Records
-    qa_records = await db.qa_records.find({"viva_exam_id": exam_id}, {"_id": 0}).to_list(1000)
+    # Fetch QA Records - group by question_id to ensure only the latest answer is shown
+    qa_records_cursor = db.qa_records.aggregate([
+        {"$match": {"viva_exam_id": exam_id}},
+        {"$sort": {"created_at": -1}},
+        {"$group": {
+            "_id": "$question_id",
+            "latest_record": {"$first": "$$ROOT"}
+        }}
+    ])
+    qa_records = []
+    async for r in qa_records_cursor:
+        record = r["latest_record"]
+        if "_id" in record:
+            record["_id"] = str(record["_id"])
+        qa_records.append(record)
     
     # Fetch Exam Set details for context
     exam_set = await db.exam_sets.find_one({"id": exam_data["exam_set_id"]}, {"_id": 0})
@@ -1219,6 +1499,71 @@ async def get_exam_report(
         "total_score": exam_data.get("total_score", 0),
         "max_score": exam_data.get("max_score", 0)
     }
+
+
+@api_router.get("/viva-exams/exam-sets/{exam_set_id}/export-excel")
+async def export_exam_results_excel(
+    exam_set_id: str,
+    current_user: User = Depends(get_current_user_dep)
+):
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.GLOBAL_ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized access"
+        )
+    
+    exam_set = await db.exam_sets.find_one({"id": exam_set_id}, {"_id": 0})
+    if not exam_set:
+        raise HTTPException(status_code=404, detail="Exam set not found")
+    
+    # Fetch all exams for this set
+    exams_list = await db.viva_exams.find({"exam_set_id": exam_set_id}, {"_id": 0}).to_list(length=1000)
+    
+    # Create Excel workbook
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Exam Results"
+    
+    # Header
+    headers = ["Student Name", "Email", "Batch", "Phone Number", "Score", "Percentage"]
+    ws.append(headers)
+    
+    for exam in exams_list:
+        # Fetch student details
+        student = await db.students.find_one({"id": exam["student_id"]}, {"_id": 0})
+        if not student:
+            continue
+
+        total_score = exam.get("total_score", 0.0)
+        max_score = exam.get("max_score", 0.0)
+
+        # Format score as "Obtained / Total" (e.g., 17.5 / 20)
+        display_score = f"{total_score:g} / {max_score:g}" if max_score > 0 else "N/A"
+
+        # Calculate percentage: total marks got / max marks possible * 100
+        percentage = round((total_score / max_score) * 100, 2) if max_score > 0 else 0
+
+        ws.append([
+            student.get("full_name", "N/A"),
+            student.get("email", "N/A"),
+            student.get("batch", "N/A"),
+            student.get("phone_number", "N/A"),
+            display_score,
+            f"{percentage}%"
+        ])
+    
+    # Save to stream
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    filename = f"Results_{exam_set['name'].replace(' ', '_')}.xlsx"
+    
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 
 @api_router.post("/voice/synthesize", response_model=Dict[str, str])
@@ -1243,37 +1588,71 @@ async def transcribe_audio_endpoint(
 
 @api_router.get("/analytics/college")
 async def get_college_analytics(current_user: User = Depends(get_current_user_dep)):
-    if current_user.role != UserRole.COLLEGE_ADMIN:
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only college admins can access analytics"
+            detail="Only college admins and teachers can access analytics"
         )
     
-    college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
-    if not college_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="College not found"
-        )
+    college_id = current_user.college_id
+    if current_user.role == UserRole.COLLEGE_ADMIN:
+        college_data = await db.colleges.find_one({"admin_id": current_user.id}, {"_id": 0})
+        if not college_data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="College not found")
+        college_id = college_data["id"]
     
-    total_students = await db.students.count_documents({"college_id": college_data["id"]})
-    total_questions = await db.questions.count_documents({"college_id": college_data["id"]})
-    total_exams = await db.viva_exams.count_documents({"college_id": college_data["id"]})
-    completed_exams = await db.viva_exams.count_documents({
-        "college_id": college_data["id"],
-        "status": ExamStatus.COMPLETED.value
-    })
+    teacher = None
+    if current_user.role == UserRole.TEACHER:
+        teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
+        if not teacher or teacher["permissions"].get("analytics") == "none":
+            # Return empty analytics instead of 403
+            return {
+                "total_students": 0,
+                "total_questions": 0,
+                "total_exams": 0,
+                "completed_exams": 0,
+                "average_score": 0,
+                "student_reports": []
+            }
+
+    total_students_query = {"college_id": college_id}
+    total_questions_query = {"college_id": college_id}
+    total_exams_query = {"college_id": college_id}
+    completed_exams_query = {"college_id": college_id, "status": ExamStatus.COMPLETED.value}
+
+    if teacher:
+        perms = teacher["permissions"]
+        if perms["analytics"] == "subject_wise" and teacher.get("subject"):
+            total_questions_query["subject"] = teacher["subject"]
+            # For exams, we'd need to join with exam_sets to filter by subject.
+            # For simplicity, we'll filter the resulting student_reports.
+        elif perms["analytics"] == "batch_wise":
+            batches = perms.get("student_data", [])
+            if "all" not in batches:
+                total_students_query["batch"] = {"$in": batches}
+
+    total_students = await db.students.count_documents(total_students_query)
+    total_questions = await db.questions.count_documents(total_questions_query)
     
-    completed_exams_list = await db.viva_exams.find({
-        "college_id": college_data["id"],
-        "status": ExamStatus.COMPLETED.value
-    }, {"_id": 0}).sort("completed_at", -1).to_list(1000)
+    # Fetch completed exams and then filter manually if needed for complex teacher permissions
+    completed_exams_list = await db.viva_exams.find(completed_exams_query, {"_id": 0}).sort("completed_at", -1).to_list(1000)
     
-    # Enrich with student names and exam set names
     student_reports = []
     for exam in completed_exams_list:
         student = await db.students.find_one({"id": exam["student_id"]})
         exam_set = await db.exam_sets.find_one({"id": exam["exam_set_id"]})
+        
+        # Teacher filtering
+        if teacher:
+            perms = teacher["permissions"]
+            if perms["analytics"] == "subject_wise" and teacher.get("subject"):
+                if not exam_set or exam_set.get("selected_subject") != teacher["subject"]:
+                    continue
+            elif perms["analytics"] == "batch_wise":
+                batches = perms.get("student_data", [])
+                if "all" not in batches and (not student or student.get("batch") not in batches):
+                    continue
+
         max_score_val = exam.get("max_score", 0)
         if not max_score_val:
             num_questions = len(exam.get("selected_questions", []))
@@ -1284,6 +1663,7 @@ async def get_college_analytics(current_user: User = Depends(get_current_user_de
             "exam_set_id": exam.get("exam_set_id"),
             "student_name": student["full_name"] if student else "Unknown",
             "student_id": student["student_id"] if student else "N/A",
+            "batch": student.get("batch") if student else "N/A",
             "exam_name": exam_set["name"] if exam_set else "Unknown",
             "subject": exam_set.get("selected_subject", "General") if exam_set else "General",
             "score": exam.get("total_score", 0),
@@ -1293,15 +1673,13 @@ async def get_college_analytics(current_user: User = Depends(get_current_user_de
     
     total_score_sum = sum(r['score'] for r in student_reports)
     total_max_score_sum = sum(r['max_score'] for r in student_reports)
-
-    # Calculate average score normalized to a scale of 10
     avg_score_normalized = (total_score_sum / total_max_score_sum * 10) if total_max_score_sum > 0 else 0
     
     return {
         "total_students": total_students,
         "total_questions": total_questions,
-        "total_exams": total_exams,
-        "completed_exams": completed_exams,
+        "total_exams": len(student_reports), # Filtered count
+        "completed_exams": len(student_reports), # Filtered count
         "average_score": round(avg_score_normalized, 2),
         "student_reports": student_reports
     }
@@ -1332,6 +1710,25 @@ async def get_global_analytics(current_user: User = Depends(get_current_user_dep
 async def root():
     return {"message": "College Viva Voice-Agent Platform API"}
 
+
+@app.on_event("startup")
+async def startup_db_client():
+    # Initialize global admin user
+    existing_admin = await db.users.find_one({"email": ADMIN_EMAIL}, {"_id": 0})
+    if not existing_admin:
+        admin_user = User(
+            email=ADMIN_EMAIL,
+            password_hash=hash_password(ADMIN_PASSWORD),
+            role=UserRole.GLOBAL_ADMIN,
+            full_name="Global Administrator"
+        )
+        user_dict = admin_user.model_dump()
+        user_dict['created_at'] = user_dict['created_at'].isoformat()
+        user_dict['updated_at'] = user_dict['updated_at'].isoformat()
+        await db.users.insert_one(user_dict)
+        logger.info(f"Global admin user created: {ADMIN_EMAIL}")
+    else:
+        logger.info(f"Global admin user already exists: {ADMIN_EMAIL}")
 
 app.include_router(api_router)
 
@@ -1369,3 +1766,14 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+if __name__ == "__main__":
+    import uvicorn
+    # Start uvicorn with reload, but specifically exclude venv to avoid MemoryError
+    uvicorn.run(
+        "server:app", 
+        host="127.0.0.1", 
+        port=8000, 
+        reload=True,
+        reload_excludes=["venv", "uploads", "__pycache__"]
+    )
