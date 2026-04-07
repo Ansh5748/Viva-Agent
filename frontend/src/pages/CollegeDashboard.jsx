@@ -355,14 +355,14 @@ const CollegeDashboard = () => {
             {[
               { id: 'overview', icon: <BarChart3 />, label: 'Overview' },
               { id: 'teachers', icon: <Users />, label: 'Teachers', permission: 'manage_teachers' },
-              { id: 'students', icon: <Users />, label: 'Students', permission: 'student_data' },
+              { id: 'students', icon: <Users />, label: 'Students', permission: 'view_students' },
               { id: 'questions', icon: <FileText />, label: 'Question Bank', permission: 'question_bank' },
               { id: 'exams', icon: <Calendar />, label: 'Exam Sets', permission: 'exam_set' },
             ].filter(item => {
               if (user.role === 'college_admin') return true;
               if (item.id === 'overview') return true;
               if (item.permission === 'manage_teachers') return user.teacher_profile?.permissions?.manage_teachers;
-              if (item.permission === 'student_data') return user.teacher_profile?.permissions?.student_data?.length > 0;
+              if (item.permission === 'view_students') return user.teacher_profile?.permissions?.view_students;
               if (item.permission === 'question_bank') return user.teacher_profile?.permissions?.question_bank;
               if (item.permission === 'exam_set') return user.teacher_profile?.permissions?.exam_set;
               return false;
@@ -905,6 +905,7 @@ const TeacherModal = ({ teacher, allBatches, onClose, onUpdate }) => {
     subject: teacher?.subject || '',
     permissions: teacher?.permissions || {
       student_data: [],
+      view_students: false,
       question_bank: false,
       exam_set: false,
       analytics: 'none',
@@ -999,7 +1000,19 @@ const TeacherModal = ({ teacher, allBatches, onClose, onUpdate }) => {
             
             <div className="space-y-3">
               <div className="p-4 bg-muted/30 rounded-2xl border border-border">
-                <label className="text-sm font-bold block mb-3">Student Data Access (Batches)</label>
+                <div className="flex items-center justify-between mb-3">
+                  <label className="text-sm font-bold block">Student Data Access (Batches)</label>
+                  <div className="flex items-center gap-2 bg-card border border-border px-3 py-1.5 rounded-xl">
+                    <span className="text-[10px] font-bold text-muted-foreground uppercase">Student Dataset</span>
+                    <input 
+                      type="checkbox"
+                      className="w-4 h-4 accent-primary disabled:opacity-30"
+                      disabled={formData.permissions.student_data.length === 0}
+                      checked={formData.permissions.view_students}
+                      onChange={(e) => setFormData({...formData, permissions: {...formData.permissions, view_students: e.target.checked}})}
+                    />
+                  </div>
+                </div>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"

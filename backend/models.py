@@ -142,6 +142,7 @@ class StudentBulkUpload(BaseModel):
 
 class TeacherPermissions(BaseModel):
     student_data: Optional[List[str]] = [] # List of batches, or ['all']
+    view_students: bool = False # Enable data loading for students
     question_bank: bool = False
     exam_set: bool = False
     analytics: str = "none" # 'none', 'overall', 'subject_wise', 'batch_wise'

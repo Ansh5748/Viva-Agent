@@ -586,7 +586,8 @@ async def get_college_students(current_user: User = Depends(get_current_user_dep
     
     if current_user.role == UserRole.TEACHER:
         teacher = await db.teachers.find_one({"user_id": current_user.id}, {"_id": 0})
-        if not teacher or "student_data" not in teacher["permissions"]:
+        # Allow fetching students if teacher has view_students OR exam_set permission
+        if not teacher or (not teacher["permissions"].get("view_students") and not teacher["permissions"].get("exam_set")):
             return [] # No permission to see student data at all
         
         batches = teacher["permissions"].get("student_data", [])
