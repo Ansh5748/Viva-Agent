@@ -20,6 +20,7 @@ An AI-powered viva platform for colleges that integrates voice AI with exam mana
 - [x] **Analytics**: Advanced filtering (Exam/Batch/Subject), Dynamic Bar Charts with X/Y axes.
 - [x] **Email Service**: SMTP (Gmail) and Resend fallback.
 - [x] **Subscription**: Plans, Approval workflow.
+- [x] **Deployment Ready**: Dockerfiles, Docker-compose, and GCP Cloud Build configurations created.
 
 ### ✅ Frontend (Completed)
 - [x] **Auth Pages**: Login, Register, Forgot/Reset Password.
@@ -50,5 +51,6 @@ An AI-powered viva platform for colleges that integrates voice AI with exam mana
 
 ## 3. Next Plan
 1.  **Refine Voice Pipeline**: Reduce latency by switching to more efficient STT/TTS models.
-2.  **Deployment**: Prepare for cloud deployment using Docker.
-3.  **Real-time Monitoring**: Add WebSocket support for real-time exam status updates.
+2.  **Real-time Monitoring**: Add WebSocket support for real-time exam status updates.
+3.  **Payment Integration**: Secure real API keys for Razorpay.
+
