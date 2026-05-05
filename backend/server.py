@@ -920,7 +920,7 @@ async def create_exam_set(
         viva_exam = VivaExam(
             exam_set_id=exam_set.id,
             student_id=student_id,
-            college_id=college.id,
+            college_id=college_id,
             status=ExamStatus.SCHEDULED
         )
         
