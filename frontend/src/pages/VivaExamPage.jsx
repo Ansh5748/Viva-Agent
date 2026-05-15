@@ -117,6 +117,7 @@ const VivaExamPage = () => {
     // Speak the question whenever the current question changes or stage becomes 'exam'
     if (examStage === 'exam' && questions[currentQuestionIndex] && !isQuestionSpoken) {
       const currentQuestionText = questions[currentQuestionIndex].question_text;
+      const questionId = questions[currentQuestionIndex].id;
       
       // Check if this question has already been added to chat history recently
       // to avoid double playback during transitions
@@ -125,7 +126,7 @@ const VivaExamPage = () => {
       if (!lastAiMsg || lastAiMsg.text !== currentQuestionText) {
         console.log("STAGE_EFFECT: Speaking current question:", currentQuestionText);
         setIsQuestionSpoken(true);
-        playAudio(currentQuestionText, true).then(() => {
+        playQuestionAudio(questionId, currentQuestionText).then(() => {
           // Optional: auto-start recording after question is read
           // But only if we are not already recording or processing
           if (!isRecording && !isProcessing) {
@@ -139,7 +140,7 @@ const VivaExamPage = () => {
       introPlayedRef.current = true;
       const welcomeText = `Welcome to your ${exam.exam_name || 'Viva'} session. I am your AI examiner. Before we begin the questions, please briefly introduce yourself. Mention your name and student ID for verification.`;
       
-      playAudio(welcomeText, true)
+      playStaticAudio('intro', welcomeText)
         .then(() => {
           console.log("STAGE_EFFECT: Intro audio finished, starting recording...");
           if (stageRef.current === 'intro') {
@@ -154,15 +155,15 @@ const VivaExamPage = () => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory]);
 
-  const playAudio = (text, addToChat = false) => {
+  const playStaticAudio = (type, fallbackText) => {
     return new Promise(async (resolve) => {
       try {
-        console.log("PLAY_AUDIO: Starting playback for:", text.substring(0, 50) + "...");
-        if (addToChat) {
+        console.log(`PLAY_STATIC_AUDIO: Playing ${type}`);
+        if (fallbackText) {
           setChatHistory(prev => {
             const lastMsg = prev[prev.length - 1];
-            if (lastMsg && lastMsg.text === text && lastMsg.sender === 'ai') return prev;
-            return [...prev, { sender: 'ai', text, timestamp: new Date() }];
+            if (lastMsg && lastMsg.text === fallbackText && lastMsg.sender === 'ai') return prev;
+            return [...prev, { sender: 'ai', text: fallbackText, timestamp: new Date() }];
           });
         }
 
@@ -172,37 +173,50 @@ const VivaExamPage = () => {
           audioRef.current = null;
         }
 
-        // Stop any ongoing browser speech synthesis
-        if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel();
-          window.speechSynthesis.resume(); // Chrome bug fix
-        }
-
-        // 1. Try Backend ElevenLabs TTS
-        const response = await api.post('/voice/synthesize', { text });
-        
-        if (response.data && response.data.audio) {
-          const audio = new Audio(`data:audio/mp3;base64,${response.data.audio}`);
-          audioRef.current = audio;
-          audio.onended = () => {
-            console.log("PLAY_AUDIO: Audio playback ended.");
-            resolve();
-          };
-          audio.onerror = (e) => {
-            console.error("PLAY_AUDIO: Audio object error:", e);
-            speakWithBrowser(text).then(resolve);
-          };
-          await audio.play();
-          return;
-        }
-        
-        // 2. Fallback to Browser Speech Synthesis if Backend fails or returns empty
-        console.warn("Backend TTS failed or returned empty. Using Browser Fallback.");
-        speakWithBrowser(text).then(resolve);
-
+        const audio = new Audio(`${api.defaults.baseURL}/voice/static/${type}`);
+        audioRef.current = audio;
+        audio.onended = () => resolve();
+        audio.onerror = async () => {
+          console.error("Static audio missing or failed. Using browser synthesis fallback.");
+          await speakWithBrowser(fallbackText);
+          resolve();
+        };
+        await audio.play();
       } catch (error) {
-        console.error('TTS Error, attempting Browser Fallback:', error);
-        speakWithBrowser(text).then(resolve);
+        console.error('Static Audio Error:', error);
+        resolve();
+      }
+    });
+  };
+
+  const playQuestionAudio = (questionId, text) => {
+    return new Promise(async (resolve) => {
+      try {
+        console.log(`PLAY_QUESTION_AUDIO: Playing question ${questionId}`);
+        setChatHistory(prev => {
+          const lastMsg = prev[prev.length - 1];
+          if (lastMsg && lastMsg.text === text && lastMsg.sender === 'ai') return prev;
+          return [...prev, { sender: 'ai', text, timestamp: new Date() }];
+        });
+
+        // Stop any current audio
+        if (audioRef.current) {
+          audioRef.current.pause();
+          audioRef.current = null;
+        }
+
+        const audio = new Audio(`${api.defaults.baseURL}/questions/${questionId}/voice`);
+        audioRef.current = audio;
+        audio.onended = () => resolve();
+        audio.onerror = async () => {
+          console.error("Question voice missing or failed. Using browser synthesis fallback to avoid real-time generation costs.");
+          await speakWithBrowser(text);
+          resolve();
+        };
+        await audio.play();
+      } catch (error) {
+        console.error('Question Audio Error:', error);
+        resolve();
       }
     });
   };
@@ -417,31 +431,58 @@ const VivaExamPage = () => {
   };
 
   const stopRecording = () => {
-    console.log("Stopping recording...");
-    // Cleanup Audio Context
+    console.log("STOP_RECORDING: Triggered manually or by auto-stop.");
+    
+    // Immediate UI feedback
+    setIsRecording(false);
+    setIsProcessing(true);
+    setTranscript('Processing...');
+
+    // Cleanup Audio Context for silence detection
     if (audioContextRef.current) {
-      audioContextRef.current.close();
+      try {
+        audioContextRef.current.close();
+      } catch (e) {
+        console.warn("Error closing audio context:", e);
+      }
       audioContextRef.current = null;
     }
+    
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
 
+    // Stop Speech Recognition
     if (recognitionRef.current) {
-      recognitionRef.current.onend = null; // Prevent restart
-      recognitionRef.current.stop();
+      console.log("STOP_RECORDING: Stopping speech recognition.");
+      recognitionRef.current.onend = null; // Prevent auto-restart
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        console.warn("Error stopping recognition:", e);
+      }
       recognitionRef.current = null;
     }
 
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
-      // Stop all tracks in the stream to turn off mic indicator
-      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
-      
-      setIsRecording(false);
-      setIsProcessing(true);
-      setTranscript('Processing...');
+    // Stop Media Recorder
+    if (mediaRecorderRef.current && (mediaRecorderRef.current.state === 'recording' || mediaRecorderRef.current.state === 'paused')) {
+      console.log("STOP_RECORDING: Stopping media recorder.");
+      try {
+        mediaRecorderRef.current.stop();
+        // Stop all tracks in the stream to turn off mic indicator
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+      } catch (e) {
+        console.warn("Error stopping media recorder:", e);
+      }
+    } else {
+      console.warn("STOP_RECORDING: Media recorder not in recording state.");
+      // If recorder wasn't running but we think we're processing, 
+      // we might need to manually trigger submission or reset state
+      if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
+        setIsProcessing(false);
+        setTranscript(transcriptRef.current || '');
+      }
     }
   };
 
@@ -493,24 +534,35 @@ const VivaExamPage = () => {
         return [...prev, { sender: 'user', text: finalUserText, timestamp: new Date() }];
       });
       
-      if (evaluation === 'repeat' || evaluation === 'clarify') {
-        // AI detected student wants to repeat or clarify
-        await playAudio(feedback, true); 
+      if (evaluation === 'repeat') {
+        // AI detected student wants to repeat
+        await playStaticAudio('repeat_intro', 'No problem. Let me repeat the question for you.'); 
         setTimeout(() => {
-          playAudio(questions[currentQuestionIndex].question_text, false);
+          playQuestionAudio(questions[currentQuestionIndex].id, questions[currentQuestionIndex].question_text);
         }, 2000);
         setFeedback(null);
         setTimeout(() => startRecording(), 4000); 
-      } else if (feedback && feedback.toLowerCase().includes("couldn't hear")) {
+      } else if (evaluation === 'clarify') {
+        // AI detected student wants to clarify
+        await playStaticAudio('clarify_intro', 'I understand. Let me clarify the question for you.'); 
+        setTimeout(() => {
+          playQuestionAudio(questions[currentQuestionIndex].id, questions[currentQuestionIndex].question_text);
+        }, 2000);
+        setFeedback(null);
+        setTimeout(() => startRecording(), 4000); 
+      } else if (feedback && typeof feedback === 'string' && feedback.toLowerCase().includes("couldn't hear")) {
         // Handle "couldn't hear you" - play message and restart mic
-        await playAudio(feedback, true);
+        await playStaticAudio('not_heard', "I couldn't hear your answer clearly. Could you please repeat it?");
         setFeedback(null);
         setTimeout(() => startRecording(), 3000);
       } else {
         setFeedback(res.data);
-        let speechText = feedback;
-        if (follow_up_hint) speechText += ". " + follow_up_hint;
-        await playAudio(speechText, true);
+        // Play "viva_complete" if it's the last question, otherwise "next_question_prompt"
+        if (currentQuestionIndex === questions.length - 1) {
+          await playStaticAudio('viva_complete', 'Thank you for taking your viva. You have successfully completed all the questions.');
+        } else {
+          await playStaticAudio('next_question_prompt', 'Should we move to the next question?');
+        }
       }
     } catch (error) {
       console.error("Submission error:", error);
@@ -790,7 +842,7 @@ const VivaExamPage = () => {
                 variant="outline" 
                 onClick={() => {
                   const welcomeText = `Welcome to your ${exam?.exam_name || 'Viva'} session. I am your AI examiner. Before we begin the questions, please briefly introduce yourself. Mention your name and student ID for verification.`;
-                  playAudio(welcomeText, false);
+                  playStaticAudio('intro', welcomeText);
                 }}
                 className="rounded-xl gap-2 font-bold border-2 hover:bg-muted mt-4"
               >
@@ -813,7 +865,7 @@ const VivaExamPage = () => {
 
               <Button 
                 variant="outline" 
-                onClick={() => playAudio(currentQuestion.question_text, false)}
+                onClick={() => playQuestionAudio(currentQuestion.id, currentQuestion.question_text)}
                 className="rounded-xl gap-2 font-bold border-2 hover:bg-muted"
               >
                 <Volume2 className="w-4 h-4" /> Replay Question
@@ -827,28 +879,45 @@ const VivaExamPage = () => {
         {/* Interaction Area */}
         <div className="flex-1 flex flex-col items-center justify-center gap-8 py-4">
           {!feedback ? (
-            <div className="flex flex-col items-center gap-6 w-full max-w-lg">
-              <div className="relative">
-                {isRecording && (
-                  <div className="absolute inset-0 bg-red-500/20 rounded-full animate-ping scale-150"></div>
-                )}
-                <button
-                  onClick={isRecording ? stopRecording : startRecording}
-                  disabled={isProcessing}
-                  className={`w-24 h-24 rounded-full flex items-center justify-center transition-all duration-500 shadow-2xl ${
-                    isRecording 
-                      ? 'bg-red-500 text-white hover:bg-red-600' 
-                      : 'bg-brand-gradient text-white hover:scale-110 shadow-primary/30'
-                  } ${isProcessing ? 'opacity-50 cursor-not-allowed' : ''}`}
-                >
-                  {isProcessing ? (
-                    <Loader2 className="w-10 h-10 animate-spin" />
-                  ) : isRecording ? (
-                    <StopCircle className="w-12 h-12" />
-                  ) : (
-                    <Mic className="w-12 h-12" />
+            <div className="flex flex-col items-center gap-8 w-full max-w-lg">
+              <div className="flex items-center justify-center gap-12 w-full">
+                <div className="relative">
+                  {isRecording && (
+                    <div className="absolute inset-0 bg-red-500/20 rounded-full animate-ping scale-150 -z-10"></div>
                   )}
-                </button>
+                  <button
+                    onClick={isRecording ? stopRecording : startRecording}
+                    disabled={isProcessing}
+                    className={`relative z-10 w-24 h-24 rounded-full flex items-center justify-center transition-all duration-500 shadow-2xl ${
+                      isRecording 
+                        ? 'bg-red-500 text-white hover:bg-red-600' 
+                        : 'bg-brand-gradient text-white hover:scale-110 shadow-primary/30'
+                    } ${isProcessing ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    {isProcessing ? (
+                      <Loader2 className="w-10 h-10 animate-spin" />
+                    ) : isRecording ? (
+                      <StopCircle className="w-12 h-12" />
+                    ) : (
+                      <Mic className="w-12 h-12" />
+                    )}
+                  </button>
+                </div>
+
+                {isRecording && (
+                  <Button 
+                    variant="destructive" 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      console.log("STOP_BUTTON_CLICKED");
+                      stopRecording();
+                    }}
+                    className="rounded-2xl px-6 py-4 h-auto text-sm font-bold uppercase tracking-widest animate-fade-in shadow-lg hover:scale-105 transition-transform z-20"
+                  >
+                    <StopCircle className="w-4 h-4 mr-2" />
+                    Stop Answering
+                  </Button>
+                )}
               </div>
 
               <div className="text-center">
@@ -865,24 +934,19 @@ const VivaExamPage = () => {
             </div>
           ) : (
             <div className="w-full space-y-6 animate-scale-in">
-              <div className="bg-card border border-border rounded-3xl p-8 shadow-lg">
-                <div className="flex items-center gap-4 mb-6">
-                  <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-                    feedback.score >= 7 ? 'bg-success-gradient text-white' : 'bg-food-gradient text-white'
-                  }`}>
-                    <Award className="w-7 h-7" />
+              <div className="bg-card border border-border rounded-3xl p-8 shadow-lg text-center">
+                <div className="flex flex-col items-center gap-4">
+                  <div className="w-16 h-16 bg-primary/10 rounded-full flex items-center justify-center text-primary">
+                    <CheckCircle2 className="w-8 h-8" />
                   </div>
-                  <div>
-                    <h4 className="text-xl font-bold">Evaluation Result</h4>
-                    <p className="text-sm text-muted-foreground font-bold">AI Scored: <span className="text-primary">{feedback.score}/10</span></p>
-                  </div>
-                </div>
-
-                <div className="space-y-4">
-                  <div className="p-4 bg-muted/50 rounded-2xl text-sm leading-relaxed">
-                    <p className="font-bold text-xs uppercase tracking-widest text-muted-foreground mb-2">Feedback</p>
-                    {feedback.feedback}
-                  </div>
+                  <h4 className="text-2xl font-bold">
+                    {currentQuestionIndex === questions.length - 1 ? 'Viva Complete' : 'Answer Received'}
+                  </h4>
+                  <p className="text-muted-foreground text-lg">
+                    {currentQuestionIndex === questions.length - 1 
+                      ? 'Thank you for taking your viva. You have successfully completed all the questions.' 
+                      : 'Should we move to the next question?'}
+                  </p>
                 </div>
               </div>
 

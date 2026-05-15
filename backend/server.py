@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, status
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, status, BackgroundTasks
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -34,6 +34,47 @@ from auth import (
 )
 from email_service import send_password_reset_email, send_welcome_email
 from voice_service import voice_service
+
+async def generate_question_voice_task(question_id: str):
+    question_data = await db.questions.find_one({"id": question_id})
+    if not question_data:
+        return
+    
+    # Generate new voice
+    path = await voice_service.generate_and_save_question_voice(
+        question_data["question_text"], 
+        question_id, 
+        UPLOAD_DIR
+    )
+    
+    if path:
+        # Success: Update to ready and clear backup if needed
+        # (We keep last_ready_voice_path as a backup of the *previous* version)
+        update_set = {
+            "voice_file_path": path, 
+            "voice_status": "ready"
+        }
+        
+        # If there was a backup, we can potentially delete it now that we have a new ready state
+        # But maybe safer to keep it until the user is happy? 
+        # For now, let's just clear the field but keep the file or delete it.
+        # Let's delete it to save space as the user said "update with another ready state"
+        if question_data.get("last_ready_voice_path"):
+            old_backup = UPLOAD_DIR / question_data["last_ready_voice_path"]
+            if old_backup.exists():
+                old_backup.unlink()
+            update_set["last_ready_voice_path"] = None
+
+        await db.questions.update_one(
+            {"id": question_id},
+            {"$set": update_set}
+        )
+    else:
+        # Failed: Keep current file but mark status as issue
+        await db.questions.update_one(
+            {"id": question_id},
+            {"$set": {"voice_status": "issue"}}
+        )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +110,189 @@ security = HTTPBearer()
 async def get_db() -> AsyncIOMotorDatabase:
     return db
 
+
+async def get_current_user_dep(
+    auth: HTTPAuthorizationCredentials = Depends(security),
+    database: AsyncIOMotorDatabase = Depends(get_db)
+) -> User:
+    token = auth.credentials
+    payload = verify_token(token, "access")
+    user_id = payload.get("sub")
+    
+    user_data = await database.users.find_one({"id": user_id}, {"_id": 0})
+    if not user_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found"
+        )
+    
+    user = User(**user_data)
+    
+    # If teacher, attach teacher profile
+    if user.role == UserRole.TEACHER:
+        teacher_data = await database.teachers.find_one({"user_id": user.id}, {"_id": 0})
+        if teacher_data:
+            user.full_name = teacher_data["full_name"] # Ensure it's in sync
+            # We can't easily attach it to the User model without modifying the Pydantic class,
+            # but we can check it in the endpoints.
+            pass
+            
+    return user
+
+@app.on_event("startup")
+async def startup_event():
+    # 1. Seed Global Admin if not exists
+    existing_admin = await db.users.find_one({"email": ADMIN_EMAIL})
+    if not existing_admin or existing_admin.get("role") != "global_admin" or not existing_admin.get("full_name"):
+        if existing_admin:
+            logger.info(f"Incorrect global admin record found for {ADMIN_EMAIL}. Deleting and recreating.")
+            await db.users.delete_one({"email": ADMIN_EMAIL})
+
+        logger.info(f"Creating default global admin: {ADMIN_EMAIL}")
+        admin_user = User(
+            email=ADMIN_EMAIL,
+            password_hash=hash_password(ADMIN_PASSWORD),
+            role=UserRole.GLOBAL_ADMIN,
+            full_name="System Administrator"
+        )
+        user_dict = admin_user.model_dump()
+        user_dict['created_at'] = user_dict['created_at'].isoformat()
+        user_dict['updated_at'] = user_dict['updated_at'].isoformat()
+        await db.users.insert_one(user_dict)
+    else:
+        logger.info(f"Global admin user already exists: {ADMIN_EMAIL}")
+
+    # 2. Diagnostics: List Gemini Models
+    await voice_service._get_available_models()
+
+    # 3. Pre-generate static voices
+    static_dir = UPLOAD_DIR / "static_voices"
+    static_dir.mkdir(exist_ok=True, parents=True)
+    
+    voices = {
+        "intro": "Welcome to your viva session. I am your AI examiner. Before we begin the questions, please briefly introduce yourself. Mention your name and student ID for verification.",
+        "next_question_prompt": "Should we move to the next question?",
+        "viva_complete": "Thank you for taking your viva. You have successfully completed all the questions.",
+        "not_heard": "I couldn't hear your answer clearly. Could you please repeat it?",
+        "repeat_intro": "No problem. Let me repeat the question for you.",
+        "clarify_intro": "I understand. Let me clarify the question for you."
+    }
+    
+    for name, text in voices.items():
+        file_path = static_dir / f"{name}.mp3"
+        if not file_path.exists():
+            logger.info(f"Pre-generating static voice: {name}")
+            audio_bytes = await voice_service.synthesize_speech(text)
+            if audio_bytes:
+                with open(file_path, "wb") as f:
+                    f.write(audio_bytes)
+
+@api_router.get("/voice/static/{voice_type}")
+async def get_static_voice(voice_type: str):
+    file_path = UPLOAD_DIR / "static_voices" / f"{voice_type}.mp3"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Static voice not found")
+    return FileResponse(file_path)
+
+@api_router.get("/questions/{question_id}/voice")
+async def get_question_voice(question_id: str):
+    question = await db.questions.find_one({"id": question_id})
+    if not question or not question.get("voice_file_path"):
+        raise HTTPException(status_code=404, detail="Voice not found")
+    
+    file_path = UPLOAD_DIR / question["voice_file_path"]
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Voice file not found on disk")
+        
+    return FileResponse(file_path)
+
+@api_router.post("/questions/{question_id}/retry-voice")
+async def retry_question_voice(
+    question_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user_dep)
+):
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    question = await db.questions.find_one({"id": question_id})
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    
+    update_data = {"voice_status": "pending"}
+    
+    # If currently ready, lock/backup the current voice
+    if question.get("voice_status") == "ready" and question.get("voice_file_path"):
+        old_path = UPLOAD_DIR / question["voice_file_path"]
+        if old_path.exists():
+            backup_filename = f"questions/backup_{question_id}_{int(datetime.now().timestamp())}.mp3"
+            backup_path = UPLOAD_DIR / backup_filename
+            import shutil
+            shutil.copy(old_path, backup_path)
+            update_data["last_ready_voice_path"] = backup_filename
+
+    await db.questions.update_one(
+        {"id": question_id},
+        {"$set": update_data}
+    )
+    background_tasks.add_task(generate_question_voice_task, question_id)
+    return {"message": "Voice generation retrying"}
+
+@api_router.post("/questions/{question_id}/revert-voice")
+async def revert_question_voice(
+    question_id: str,
+    current_user: User = Depends(get_current_user_dep)
+):
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    question = await db.questions.find_one({"id": question_id})
+    if not question or not question.get("last_ready_voice_path"):
+        raise HTTPException(status_code=400, detail="No backup voice to revert to")
+    
+    await db.questions.update_one(
+        {"id": question_id},
+        {"$set": {
+            "voice_file_path": question["last_ready_voice_path"],
+            "voice_status": "ready",
+            "last_ready_voice_path": None
+        }}
+    )
+    return {"message": "Reverted to last ready voice state"}
+
+@api_router.patch("/questions/{question_id}")
+async def update_question(
+    question_id: str,
+    update_data: Dict[str, Any],
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user_dep)
+):
+    if current_user.role not in [UserRole.COLLEGE_ADMIN, UserRole.TEACHER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    existing = await db.questions.find_one({"id": question_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Question not found")
+        
+    # If question text changed, regenerate voice
+    text_changed = "question_text" in update_data and update_data["question_text"] != existing["question_text"]
+    
+    if text_changed:
+        # Delete old voice file if exists
+        if existing.get("voice_file_path"):
+            old_path = UPLOAD_DIR / existing["voice_file_path"]
+            if old_path.exists():
+                old_path.unlink()
+        
+        update_data["voice_status"] = "pending"
+        update_data["voice_file_path"] = None
+
+    await db.questions.update_one({"id": question_id}, {"$set": update_data})
+    
+    if text_changed:
+        background_tasks.add_task(generate_question_voice_task, question_id)
+        
+    return {"message": "Question updated successfully"}
 
 @api_router.post("/auth/register", response_model=TokenResponse)
 async def register(user_create: UserCreate):
@@ -218,35 +442,6 @@ async def reset_password(request: ResetPasswordRequest):
         )
     
     return {"message": "Password reset successful"}
-
-
-async def get_current_user_dep(
-    auth: HTTPAuthorizationCredentials = Depends(security),
-    database: AsyncIOMotorDatabase = Depends(get_db)
-) -> User:
-    token = auth.credentials
-    payload = verify_token(token, "access")
-    user_id = payload.get("sub")
-    
-    user_data = await database.users.find_one({"id": user_id}, {"_id": 0})
-    if not user_data:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found"
-        )
-    
-    user = User(**user_data)
-    
-    # If teacher, attach teacher profile
-    if user.role == UserRole.TEACHER:
-        teacher_data = await database.teachers.find_one({"user_id": user.id}, {"_id": 0})
-        if teacher_data:
-            user.full_name = teacher_data["full_name"] # Ensure it's in sync
-            # We can't easily attach it to the User model without modifying the Pydantic class,
-            # but we can check it in the endpoints.
-            pass
-            
-    return user
 
 
 @api_router.get("/auth/me")
@@ -753,6 +948,7 @@ async def delete_teacher(teacher_id: str, current_user: User = Depends(get_curre
 
 @api_router.post("/questions/bulk-upload")
 async def bulk_upload_questions(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user_dep)
 ):
@@ -806,7 +1002,8 @@ async def bulk_upload_questions(
                 difficulty_level=DifficultyLevel(difficulty_str),
                 answer_key=answer_key,
                 subject=subject,
-                topic=topic
+                topic=topic,
+                voice_status="pending"
             )
             
             question_dict = question.model_dump()
@@ -814,6 +1011,7 @@ async def bulk_upload_questions(
             question_dict['created_at'] = question_dict['created_at'].isoformat()
             await db.questions.insert_one(question_dict)
             
+            background_tasks.add_task(generate_question_voice_task, question.id)
             questions_created += 1
         
         return {"message": f"Successfully uploaded {questions_created} questions"}
@@ -1262,7 +1460,7 @@ async def start_viva_exam(
             }
 
     # Fetch questions based on subject and topics
-    query = {"college_id": exam.college_id}
+    query = {"college_id": exam.college_id, "voice_status": "ready"}
     if exam_set.selected_subject:
         query["subject"] = exam_set.selected_subject
     if exam_set.selected_topics:
@@ -1712,25 +1910,6 @@ async def root():
     return {"message": "College Viva Voice-Agent Platform API"}
 
 
-@app.on_event("startup")
-async def startup_db_client():
-    # Initialize global admin user
-    existing_admin = await db.users.find_one({"email": ADMIN_EMAIL}, {"_id": 0})
-    if not existing_admin:
-        admin_user = User(
-            email=ADMIN_EMAIL,
-            password_hash=hash_password(ADMIN_PASSWORD),
-            role=UserRole.GLOBAL_ADMIN,
-            full_name="Global Administrator"
-        )
-        user_dict = admin_user.model_dump()
-        user_dict['created_at'] = user_dict['created_at'].isoformat()
-        user_dict['updated_at'] = user_dict['updated_at'].isoformat()
-        await db.users.insert_one(user_dict)
-        logger.info(f"Global admin user created: {ADMIN_EMAIL}")
-    else:
-        logger.info(f"Global admin user already exists: {ADMIN_EMAIL}")
-
 app.include_router(api_router)
 
 app.add_middleware(
@@ -1740,29 +1919,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.on_event("startup")
-async def startup_event():
-    # Seed Global Admin if not exists
-    existing_admin = await db.users.find_one({"email": ADMIN_EMAIL})
-    # Check if admin exists and has the correct role and a full_name
-    if not existing_admin or existing_admin.get("role") != "global_admin" or not existing_admin.get("full_name"):
-        if existing_admin:
-            logger.info(f"Incorrect global admin record found for {ADMIN_EMAIL}. Deleting and recreating.")
-            await db.users.delete_one({"email": ADMIN_EMAIL})
-
-        logger.info(f"Creating default global admin: {ADMIN_EMAIL}")
-        admin_user = User(
-            email=ADMIN_EMAIL,
-            password_hash=hash_password(ADMIN_PASSWORD),
-            role=UserRole.GLOBAL_ADMIN,
-            full_name="System Administrator"
-        )
-        user_dict = admin_user.model_dump()
-        user_dict['created_at'] = user_dict['created_at'].isoformat()
-        user_dict['updated_at'] = user_dict['updated_at'].isoformat()
-        await db.users.insert_one(user_dict)
-
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

@@ -180,6 +180,9 @@ class Question(BaseModel):
     answer_key: str
     subject: Optional[str] = None
     topic: Optional[str] = None
+    voice_file_path: Optional[str] = None
+    last_ready_voice_path: Optional[str] = None
+    voice_status: str = "pending" # pending, ready, issue
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class QuestionBankUpload(BaseModel):

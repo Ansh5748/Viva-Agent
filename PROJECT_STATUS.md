@@ -15,8 +15,9 @@ An AI-powered viva platform for colleges that integrates voice AI with exam mana
 - [x] **Teacher Management**: Teacher creation, Permission-based RBAC (Subject/Batch restriction).
 - [x] **Student Management**: Bulk upload via Excel, Listing, Batch filtering.
 - [x] **Question Bank**: Bulk upload via Excel, Dynamic Difficulty tags, Answer keys.
-- [x] **Exam Logic**: Exam Sets, Random selection, Grading, Reverse chronological ordering.
-- [x] **Voice Services**: STT (ElevenLabs Scribe), TTS (ElevenLabs), LLM Evaluation (Gemini 1.5 Flash).
+- [x] **Voice Management**: Background voice generation, Retry/Revert voice logic for questions.
+- [x] **Exam Logic**: Exam Sets, Random selection, Topic-wise configuration, Grading, Reverse chronological ordering.
+- [x] **Voice Services**: STT (ElevenLabs Scribe / Browser fallback), TTS (ElevenLabs), LLM Evaluation (Gemini 1.5 Flash).
 - [x] **Analytics**: Advanced filtering (Exam/Batch/Subject), Dynamic Bar Charts with X/Y axes.
 - [x] **Email Service**: SMTP (Gmail) and Resend fallback.
 - [x] **Subscription**: Plans, Approval workflow.
@@ -28,8 +29,21 @@ An AI-powered viva platform for colleges that integrates voice AI with exam mana
 - [x] **Teacher Management UI**: CRUD operations and detailed Permission management.
 - [x] **Analytics & Reports**: Interactive modal with dynamic top performers, batch/subject filters, and professional bar graphs.
 - [x] **Viva Exam Interface**: Isolated chat scrolling, conditional introduction, voice stop/play logic.
+- [x] **Security**: Tab-switch/Window blur detection (3-strike system) with auto-submit.
+- [x] **Resilience**: Resuming in-progress exams, Browser-based TTS fallback for cost/latency optimization.
+- [x] **Smart Interaction**: Context-aware end-of-exam voice prompts and intelligent intent detection.
+- [x] **UI/UX Refinement**: Dynamic feedback text for exam completion and optimized layout for voice recording controls (side-by-side buttons for better accessibility).
 - [x] **Protected Routes**: Role-based access control for all dashboards.
 - [x] **Design System**: Figtree font, custom gradients (`brand`, `ar`, `success`, `food`), and Shadcn/UI integration.
+- [x] **Dashboard Optimization**: Refactored Student Dashboard to a 4-column stats layout for better visibility of performance metrics.
+
+### ✅ Issues Resolved
+- [x] **Voice Latency/Cost**: Optimized STT/TTS pipeline by using pre-generated voices and browser fallback. Reordered ElevenLabs voice IDs to prioritize working models.
+- [x] **Gemini 404s**: Corrected model naming and added startup diagnostics. Updated to support Gemini 2.5 and 3.0 preview models.
+- [x] **Redundant Calls**: Eliminated real-time ElevenLabs TTS during viva; all interactions now render pre-generated or browser-synthesized audio.
+- [x] **Blank Screens**: Fixed missing `Activity` icon import in `StudentDashboard.jsx` and added type safety to feedback processing in `VivaExamPage.jsx`.
+- [x] **AI Professionalism**: Refined Gemini evaluation prompt to provide formal, academic feedback without conversational filler or follow-up questions.
+- [x] **Noise Handling**: Added robust noise markers (e.g., '(logo whooshing)') to skip unnecessary LLM processing for invalid audio.
 
 ### ✅ Tested
 - [x] **Backend Tests**: Root API, Auth failures, College creation.

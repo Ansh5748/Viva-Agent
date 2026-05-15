@@ -7,7 +7,7 @@ import { toast } from 'sonner';
 import api from '../utils/api';
 import {
   Mic, Upload, Users, BookOpen, Calendar, BarChart3, 
-  LogOut, FileText, CheckCircle, Clock, TrendingUp, Plus, Sun, Moon, Trash2, Folder, ChevronRight, ChevronDown, X, Search, Filter, ArrowUpDown, Edit2, Save, Activity, Layers, PieChart, Award, MessageSquare, FileSpreadsheet
+  LogOut, FileText, CheckCircle, Clock, TrendingUp, Plus, Sun, Moon, Trash2, Folder, ChevronRight, ChevronDown, X, Search, Filter, ArrowUpDown, Edit2, Save, Activity, Layers, PieChart, Award, MessageSquare, FileSpreadsheet, Volume2, RotateCcw, Undo
 } from 'lucide-react'; 
 
 const CollegeDashboard = () => {
@@ -25,6 +25,7 @@ const CollegeDashboard = () => {
   const [showAnalyticsModal, setShowAnalyticsModal] = useState(false);
   const [showTeacherModal, setShowTeacherModal] = useState(false);
   const [editingTeacher, setEditingTeacher] = useState(null);
+  const [editingQuestion, setEditingQuestion] = useState(null);
   const [expandedSubjects, setExpandedSubjects] = useState({});
   const [expandedTopics, setExpandedTopics] = useState({});
   const [isUploading, setIsUploading] = useState(false);
@@ -212,6 +213,33 @@ const CollegeDashboard = () => {
       toast.success("Teacher deleted");
       loadData();
     } catch (e) { toast.error("Failed to delete"); }
+  };
+
+  const playQuestionVoice = (questionId) => {
+    const audio = new Audio(`${api.defaults.baseURL}/questions/${questionId}/voice`);
+    audio.play().catch(err => {
+      toast.error("Failed to play voice. It might still be generating.");
+    });
+  };
+
+  const handleRetryVoice = async (questionId) => {
+    try {
+      await api.post(`/questions/${questionId}/retry-voice`);
+      toast.success("Retrying voice generation...");
+      setTimeout(loadData, 2000);
+    } catch (err) {
+      toast.error("Failed to retry voice generation");
+    }
+  };
+
+  const handleRevertVoice = async (questionId) => {
+    try {
+      await api.post(`/questions/${questionId}/revert-voice`);
+      toast.success("Reverted to last ready voice state");
+      loadData();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Failed to revert voice");
+    }
   };
 
   const handleLogout = () => {
@@ -755,10 +783,35 @@ const CollegeDashboard = () => {
                                   {paginate(qs, questionTopicPages[`${subject}-${topic}`] || 1, QS_PER_PAGE).map((q) => (
                                     <div key={q.id} className="flex flex-col p-4 bg-card border border-border rounded-xl gap-3">
                                       <div className="flex items-start justify-between gap-4">
-                                        <div className="flex-1">
+                                        <div className="flex items-center gap-3 flex-1">
+                                          <Button 
+                                            variant="ghost" 
+                                            size="icon" 
+                                            onClick={() => playQuestionVoice(q.id)}
+                                            disabled={q.voice_status !== 'ready'}
+                                            className="h-10 w-10 rounded-full bg-primary/5 text-primary hover:bg-primary/10 shrink-0"
+                                          >
+                                            <Volume2 className="w-5 h-5" />
+                                          </Button>
                                           <p className="font-bold text-sm leading-relaxed">{q.question_text}</p>
                                         </div>
                                         <div className="flex items-center gap-2 flex-shrink-0">
+                                          {q.voice_status === 'ready' ? (
+                                            <div className="flex items-center gap-1">
+                                              <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-bold uppercase tracking-wider">Ready</span>
+                                              <Button variant="ghost" size="icon" title="Regenerate Voice" onClick={() => handleRetryVoice(q.id)} className="h-6 w-6 text-primary hover:bg-primary/10"><RotateCcw className="w-3 h-3" /></Button>
+                                            </div>
+                                          ) : q.voice_status === 'issue' ? (
+                                            <div className="flex items-center gap-1">
+                                              <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-[10px] font-bold uppercase tracking-wider">Issue</span>
+                                              <Button variant="ghost" size="icon" title="Retry Generation" onClick={() => handleRetryVoice(q.id)} className="h-6 w-6 text-primary hover:bg-primary/10"><RotateCcw className="w-3 h-3" /></Button>
+                                              {q.last_ready_voice_path && (
+                                                <Button variant="ghost" size="icon" title="Revert to Previous Voice" onClick={() => handleRevertVoice(q.id)} className="h-6 w-6 text-orange-600 hover:bg-orange-100"><Undo className="w-3 h-3" /></Button>
+                                              )}
+                                            </div>
+                                          ) : (
+                                            <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded-full text-[10px] font-bold uppercase tracking-wider animate-pulse">Pending</span>
+                                          )}
                                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
                                             (q.difficulty_level || q.difficulty)?.toLowerCase() === 'easy' ? 'bg-green-100 text-green-700' :
                                             (q.difficulty_level || q.difficulty)?.toLowerCase() === 'hard' ? 'bg-red-100 text-red-700' :
@@ -766,6 +819,9 @@ const CollegeDashboard = () => {
                                           }`}>
                                             {q.difficulty_level || q.difficulty || 'Medium'}
                                           </span>
+                                          <Button variant="ghost" size="sm" onClick={() => setEditingQuestion(q)} className="text-primary hover:bg-primary/10">
+                                            <Edit2 className="w-4 h-4" />
+                                          </Button>
                                           <Button variant="ghost" size="sm" onClick={() => handleDeleteQuestion(q.id)} className="text-destructive hover:bg-destructive/10">
                                             <Trash2 className="w-4 h-4" />
                                           </Button>
@@ -864,6 +920,15 @@ const CollegeDashboard = () => {
           teacher={editingTeacher}
           allBatches={uniqueBatches}
           onClose={() => setShowTeacherModal(false)}
+          onUpdate={loadData}
+        />
+      )}
+
+      {/* Question Edit Modal */}
+      {editingQuestion && (
+        <QuestionEditModal 
+          question={editingQuestion}
+          onClose={() => setEditingQuestion(null)}
           onUpdate={loadData}
         />
       )}
@@ -1595,6 +1660,83 @@ const DetailedReportModal = ({ report, onClose }) => {
             ))}
           </div>
         </div>
+      </div>
+    </div>
+  );
+};
+
+const QuestionEditModal = ({ question, onClose, onUpdate }) => {
+  const [formData, setFormData] = useState({
+    question_text: question.question_text || '',
+    answer_key: question.answer_key || '',
+    difficulty_level: question.difficulty_level || 'medium'
+  });
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const toastId = toast.loading("Updating question...");
+    try {
+      await api.patch(`/questions/${question.id}`, formData);
+      toast.success("Question updated", { id: toastId });
+      onUpdate();
+      onClose();
+    } catch (error) {
+      toast.error("Failed to update question", { id: toastId });
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 animate-fade-in">
+      <div className="bg-card border border-border rounded-3xl w-full max-w-xl shadow-2xl overflow-hidden">
+        <header className="p-6 border-b border-border flex items-center justify-between bg-muted/30">
+          <h3 className="text-xl font-bold">Edit Question</h3>
+          <Button variant="ghost" size="icon" onClick={onClose} className="rounded-full"><X className="w-5 h-5" /></Button>
+        </header>
+        <form onSubmit={handleSubmit} className="p-6 space-y-6">
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase text-muted-foreground">Question Text</label>
+            <textarea 
+              required
+              rows={3}
+              className="w-full p-3 rounded-xl border border-border bg-muted/30 focus:ring-2 focus:ring-primary/50 outline-none resize-none"
+              value={formData.question_text}
+              onChange={(e) => setFormData({...formData, question_text: e.target.value})}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase text-muted-foreground">Correct Answer / Key</label>
+            <textarea 
+              required
+              rows={3}
+              className="w-full p-3 rounded-xl border border-border bg-muted/30 focus:ring-2 focus:ring-primary/50 outline-none resize-none"
+              value={formData.answer_key}
+              onChange={(e) => setFormData({...formData, answer_key: e.target.value})}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase text-muted-foreground">Difficulty Level</label>
+            <div className="grid grid-cols-3 gap-2">
+              {['easy', 'medium', 'hard'].map((level) => (
+                <button
+                  key={level}
+                  type="button"
+                  onClick={() => setFormData({...formData, difficulty_level: level})}
+                  className={`py-2 px-4 rounded-xl border text-sm font-bold capitalize transition-all ${
+                    formData.difficulty_level === level 
+                      ? 'bg-primary/10 border-primary text-primary' 
+                      : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted'
+                  }`}
+                >
+                  {level}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex gap-3 pt-4">
+            <Button type="button" variant="outline" onClick={onClose} className="flex-1 rounded-xl h-12 font-bold">Cancel</Button>
+            <Button type="submit" className="flex-1 bg-brand-gradient text-white rounded-xl h-12 font-bold shadow-lg shadow-primary/20">Update Question</Button>
+          </div>
+        </form>
       </div>
     </div>
   );

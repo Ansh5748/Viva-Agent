@@ -5,7 +5,7 @@ import { useTheme } from '../context/ThemeContext';
 import { Button } from '../components/ui/button';
 import { toast } from 'sonner';
 import api from '../utils/api';
-import { Mic, Calendar, Clock, CheckCircle, Play, LogOut, BookOpen, Award, Sun, Moon, Loader2, TrendingUp, BarChart3, X, Target, Zap, MessageSquare } from 'lucide-react';
+import { Mic, Calendar, Clock, CheckCircle, Play, LogOut, BookOpen, Award, Sun, Moon, Loader2, TrendingUp, BarChart3, X, Target, Zap, MessageSquare, Activity } from 'lucide-react';
 
 const StudentDashboard = () => {
   const { user, logout } = useAuth();
@@ -158,66 +158,24 @@ const StudentDashboard = () => {
             </div>
           </div>
           <div className="bg-card border border-border rounded-3xl p-6 shadow-sm flex items-center gap-4">
-            <div className="w-12 h-12 rounded-2xl bg-ar-gradient/10 flex items-center justify-center text-purple-500">
-              <TrendingUp className="w-6 h-6" />
-            </div>
-            <div>
-              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider">Avg. Score</p>
-              <p className="text-2xl font-bold">{avgScore}/{completedExams[0]?.max_score || 10}</p>
-            </div>
-          </div>
-          <div className="bg-card border border-border rounded-3xl p-6 shadow-sm flex items-center gap-4">
-            <div className="w-12 h-12 rounded-2xl bg-food-gradient/10 flex items-center justify-center text-orange-500">
+            <div className="w-12 h-12 rounded-2xl bg-orange-500/10 flex items-center justify-center text-orange-500">
               <Target className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider">Best Score</p>
-              <p className="text-2xl font-bold">{highestScore}/{completedExams[0]?.max_score || 10}</p>
+              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider">Completion Rate</p>
+              <p className="text-2xl font-bold">{completionRate}%</p>
+            </div>
+          </div>
+          <div className="bg-card border border-border rounded-3xl p-6 shadow-sm flex items-center gap-4">
+            <div className="w-12 h-12 rounded-2xl bg-purple-500/10 flex items-center justify-center text-purple-500">
+              <Zap className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-muted-foreground uppercase tracking-wider">Minutes Spoken</p>
+              <p className="text-2xl font-bold">{completedExams.reduce((acc, e) => acc + (e.duration_minutes || 0), 0)}m</p>
             </div>
           </div>
         </div>
-
-        {/* Performance Overview */}
-        {completedExams.length > 0 && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-10">
-            <div className="lg:col-span-2 bg-card border border-border rounded-3xl p-8 shadow-sm">
-              <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
-                <BarChart3 className="w-5 h-5 text-primary" /> Performance Trends
-              </h3>
-              <div className="space-y-6">
-                {completedExams.slice(0, 3).map((exam, idx) => (
-                  <div key={idx}>
-                    <div className="flex justify-between text-sm font-bold mb-2">
-                      <span>{exam.exam_name || 'Viva Exam'}</span>
-                      <span className="text-primary">{exam.score || 0}/{exam.max_score || 10}</span>
-                    </div>
-                    <div className="h-3 w-full bg-muted rounded-full overflow-hidden">
-                      <div 
-                        className="h-full bg-brand-gradient rounded-full transition-all duration-1000" 
-                        style={{ width: `${((exam.score || 0) / (exam.max_score || 10)) * 100}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="bg-card border border-border rounded-3xl p-8 shadow-sm">
-              <h3 className="text-xl font-bold mb-6 flex items-center gap-2">
-                <Zap className="w-5 h-5 text-yellow-500" /> Quick Stats
-              </h3>
-              <div className="space-y-4">
-                <div className="p-4 bg-muted/30 rounded-2xl border border-border">
-                  <p className="text-xs font-bold text-muted-foreground uppercase">Completion Rate</p>
-                  <p className="text-2xl font-bold text-foreground">{completionRate}%</p>
-                </div>
-                <div className="p-4 bg-muted/30 rounded-2xl border border-border">
-                  <p className="text-xs font-bold text-muted-foreground uppercase">Total Minutes Spoken</p>
-                  <p className="text-2xl font-bold text-foreground">{completedExams.reduce((acc, e) => acc + (e.duration_minutes || 0), 0)}m</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
 
         {exams.length === 0 ? (
           <div className="bg-card border border-dashed border-border rounded-3xl p-16 text-center shadow-sm">
@@ -254,9 +212,6 @@ const StudentDashboard = () => {
                         }`}>
                           {exam.status}
                         </span>
-                        {exam.status === 'completed' && exam.score !== undefined && (
-                          <span className="flex items-center gap-1.5 text-primary font-bold"><Award className="w-4 h-4" /> Score: {exam.score}/{exam.max_score || 10}</span>
-                        )}
                       </div>
                     </div>
                   </div>
@@ -312,11 +267,11 @@ const StudentDashboard = () => {
             
             <div className="p-8 overflow-y-auto space-y-8">
               <div className="flex flex-col items-center justify-center text-center">
-                <div className="w-24 h-24 rounded-full bg-success-gradient flex items-center justify-center text-white shadow-lg mb-4">
-                  <span className="text-4xl font-bold">{selectedExamAnalysis.total_score?.toFixed(1) || 0}</span>
+                <div className="w-20 h-20 rounded-full bg-success-gradient flex items-center justify-center text-white shadow-lg mb-4">
+                  <CheckCircle className="w-10 h-10" />
                 </div>
-                <p className="text-lg font-bold">Total Score / {selectedExamAnalysis.qa_records?.length * 10 || 10}</p>
-                <p className="text-muted-foreground">Great ffort! Here is your summary.</p>
+                <p className="text-lg font-bold">Viva Session Completed</p>
+                <p className="text-muted-foreground">Great effort! Here is your summary.</p>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -341,9 +296,6 @@ const StudentDashboard = () => {
                         <span className="text-xs font-bold text-primary uppercase tracking-wider">Question {idx + 1}</span>
                         <p className="font-medium mt-1">{record.question_text}</p>
                       </div>
-                      <span className={`px-3 py-1 rounded-full text-xs font-bold ${record.score >= 7 ? 'bg-green-100 text-green-700' : record.score >= 4 ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-700'}`}>
-                        {record.score}/10
-                      </span>
                     </div>
                     <div className="p-4 space-y-4">
                       <div>

@@ -1,12 +1,15 @@
 import os
 import base64
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import logging
 import google.generativeai as genai
 from elevenlabs.client import AsyncElevenLabs
+import edge_tts
+from gtts import gTTS
 from dotenv import load_dotenv
 import io
 import json
+import asyncio
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent
@@ -24,70 +27,30 @@ class VoiceService:
         if not GOOGLE_API_KEY:
             raise ValueError("GEMINI_API_KEY environment variable not set.")
         
-        # Masked API key for logging
-        masked_key = f"{GOOGLE_API_KEY[:4]}...{GOOGLE_API_KEY[-4:]}" if len(GOOGLE_API_KEY) > 8 else "****"
-        logger.info(f"Initializing VoiceService with Gemini API Key: {masked_key}")
-        
         self.elevenlabs = AsyncElevenLabs(api_key=ELEVENLABS_API_KEY)
         genai.configure(api_key=GOOGLE_API_KEY)
         
-        # Log available models for diagnostic purposes
+        self.model_names = [
+            'gemini-2.5-flash',
+            'gemini-2.0-flash',
+            'gemini-1.5-flash',
+            'gemini-3-flash-preview',
+            'models/gemini-2.5-flash',
+            'models/gemini-2.0-flash',
+            'models/gemini-1.5-flash'
+        ]
+        logger.info(f"VoiceService initialized with models: {self.model_names}")
+    
+    async def _get_available_models(self):
+        """Helper to list available models for debugging."""
         try:
-            logger.info("Listing available models from google-generativeai...")
-            available_models = []
-            # Try to list models to see what's actually allowed for this key
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    available_models.append(m.name)
-            
-            if not available_models:
-                logger.warning("No models found via genai.list_models(). This might indicate an API key or permission issue.")
-                # Check a specific common model directly
-                try:
-                    m = genai.get_model('models/gemini-1.5-flash')
-                    logger.info(f"Successfully retrieved model info for 'models/gemini-1.5-flash' directly: {m.display_name}")
-                    available_models.append('models/gemini-1.5-flash')
-                except Exception as get_e:
-                    logger.error(f"Failed to get 'models/gemini-1.5-flash' directly: {str(get_e)}")
-            else:
-                logger.info(f"Available Models found: {available_models}")
-            
-            # We will use these models in this priority order. 
-            # We mix 'models/' prefix and no prefix to cover all SDK behaviors.
-            self.model_names = [
-                'gemini-1.5-flash-latest',
-                'gemini-1.5-pro-latest',
-                'gemini-1.5-flash',
-                'gemini-1.5-pro',
-                'gemini-1.0-pro',
-                'models/gemini-1.5-flash-latest',
-                'models/gemini-1.5-pro-latest',
-                'models/gemini-1.5-flash',
-                'models/gemini-1.5-pro',
-                'models/gemini-1.0-pro'
-            ]
-            
-            # If list_models returned something, prepend it to our list to prioritize it
-            for m in reversed(available_models):
-                if m not in self.model_names:
-                    self.model_names.insert(0, m)
-                else:
-                    # Move to front
-                    self.model_names.remove(m)
-                    self.model_names.insert(0, m)
-                    
+            models = genai.list_models()
+            available = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
+            logger.info(f"Available Gemini models: {available}")
+            return available
         except Exception as e:
-            logger.error(f"Failed to list models during init: {str(e)}")
-            self.model_names = [
-                'gemini-1.5-flash',
-                'gemini-1.5-pro',
-                'gemini-1.0-pro',
-                'models/gemini-1.5-flash',
-                'models/gemini-1.5-pro',
-                'models/gemini-1.0-pro'
-            ]
-
-        logger.info(f"VoiceService initialized with model fallback list: {self.model_names}")
+            logger.error(f"Failed to list Gemini models: {str(e)}")
+            return []
     
     async def transcribe_audio(self, audio_bytes: bytes, language: str = "en") -> str:
         try:
@@ -136,16 +99,29 @@ class VoiceService:
             return "" 
     
     async def synthesize_speech(self, text: str, voice: str = "nova") -> bytes:
-        # Most common standard voices available on almost all tiers
-        voice_priorities = [
-            "21m00Tcm4TlvDq8ikWAM", # Rachel (Standard)
-            "AZnzlk1XhxPjt8vD08Py", # Domi (Standard)
-            "EXAVITQu4vr4xnSDxMaL", # Bella (Standard)
+        """
+        Synthesizes speech using ElevenLabs (Primary) with Edge-TTS and gTTS fallbacks.
+        """
+        if not text:
+            return b""
+
+        # Standard voices that are 100% compatible with ElevenLabs FREE tier API
+        # Priority: EXAVITQu4vr4xnSDxMaL (Bella) is confirmed working
+        voice_ids = [
+            "EXAVITQu4vr4xnSDxMaL", # Bella (Standard - Friendly Female) - CONFIRMED WORKING
+            "iP95p4H64I86u9K3X4yP", # Aditi (Indian Female - Very Natural)
+            "MF3mAn0U9u06S3W2m7jU", # Elli (Standard - Calm, Humanistic Female)
+            "AZnzlk1XhxPjt8vD08Py", # Domi (Standard - Professional Female)
+            "21m00Tcm4TlvDq8ikWAM", # Rachel (Standard - Clear Female)
         ]
 
-        for voice_id in voice_priorities:
+        # Use requested voice if provided
+        if voice and voice != "nova" and voice not in voice_ids:
+            voice_ids.insert(0, voice)
+
+        for voice_id in voice_ids:
             try:
-                logger.info(f"Attempting TTS with voice ID: {voice_id}")
+                logger.info(f"TTS: Attempting ElevenLabs ({voice_id})...")
                 audio_stream = self.elevenlabs.text_to_speech.convert(
                     voice_id=voice_id,
                     text=text,
@@ -155,22 +131,43 @@ class VoiceService:
                 audio_bytes = b""
                 async for chunk in audio_stream:
                     audio_bytes += chunk
-                return audio_bytes
-
+                
+                if audio_bytes and len(audio_bytes) > 500:
+                    logger.info(f"TTS Success: ElevenLabs ({voice_id})")
+                    return audio_bytes
             except Exception as e:
-                error_msg = str(e).lower()
-                logger.warning(f"ElevenLabs attempt failed for voice {voice_id}: {error_msg}")
+                logger.warning(f"ElevenLabs failed for {voice_id}: {str(e)}")
+                if "quota_exceeded" in str(e).lower(): break
+
+        # 2. Fallback: Edge-TTS (Free Neural - High Quality)
+        indian_voices = ["en-IN-NeerjaNeural", "en-IN-PrabhatNeural"]
+        for ev in indian_voices:
+            try:
+                logger.info(f"TTS Fallback: Attempting Edge-TTS ({ev})...")
+                communicate = edge_tts.Communicate(text, ev)
+                buffer = io.BytesIO()
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        buffer.write(chunk["data"])
                 
-                # If it's a quota or activity block, don't keep trying other voices immediately
-                if "detected_unusual_activity" in error_msg or "quota_exceeded" in error_msg:
-                    logger.error("ElevenLabs account restricted or quota hit.")
-                    break
-                
-                # Otherwise, continue to next voice in list
-                continue
-        
-        # If all attempts fail, return empty bytes instead of raising to prevent 500 error
-        logger.error("All ElevenLabs TTS attempts failed. Returning empty audio.")
+                if buffer.tell() > 500:
+                    logger.info(f"TTS Success: Edge-TTS ({ev})")
+                    return buffer.getvalue()
+            except Exception as e:
+                logger.warning(f"Edge-TTS failed for {ev}: {str(e)}")
+
+        # 3. Final Fallback: gTTS (Reliable)
+        try:
+            logger.info("TTS Final Fallback: Attempting gTTS...")
+            tts = gTTS(text=text, lang='en', tld='co.in')
+            buffer = io.BytesIO()
+            tts.write_to_fp(buffer)
+            if buffer.tell() > 500:
+                logger.info("TTS Success: gTTS")
+                return buffer.getvalue()
+        except Exception as e:
+            logger.error(f"TTS Error: All engines failed: {str(e)}")
+
         return b""
 
     async def synthesize_speech_base64(self, text: str, voice: str = "nova") -> str:
@@ -182,6 +179,26 @@ class VoiceService:
         except Exception as e:
             logger.error(f"TTS Base64 conversion failed: {str(e)}")
             return ""
+
+    async def generate_and_save_question_voice(self, text: str, question_id: str, upload_dir: Path) -> Optional[str]:
+        try:
+            audio_bytes = await self.synthesize_speech(text)
+            if not audio_bytes:
+                return None
+            
+            question_dir = upload_dir / "questions"
+            question_dir.mkdir(exist_ok=True, parents=True)
+            
+            file_name = f"{question_id}.mp3"
+            file_path = question_dir / file_name
+            
+            with open(file_path, "wb") as f:
+                f.write(audio_bytes)
+            
+            return f"questions/{file_name}"
+        except Exception as e:
+            logger.error(f"Error saving question voice: {str(e)}")
+            return None
 
     def _parse_gemini_json(self, text: str) -> Dict[str, Any]:
         """Helper to clean and parse JSON from Gemini response."""
@@ -225,13 +242,18 @@ class VoiceService:
         
         # Clean up student answer
         clean_answer = student_answer.strip() if student_answer else ""
-        invalid_markers = ["", "Listening...", "Processing...", "(No speech detected)", "Introduction recorded.", "Introduction provided."]
+        # Expanded list of invalid/noisy markers to reduce unnecessary LLM calls and latency
+        invalid_markers = [
+            "", "Listening...", "Processing...", "(No speech detected)", 
+            "Introduction recorded.", "Introduction provided.", 
+            "(logo whooshing)", "(Music)", "(Laughter)", "(Silence)", "[Music]", "[Laughter]"
+        ]
         
-        if not clean_answer or clean_answer in invalid_markers:
-            logger.warning(f"EVALUATION: Student answer is invalid: '{clean_answer}'")
+        if not clean_answer or clean_answer in invalid_markers or len(clean_answer) < 3:
+            logger.warning(f"EVALUATION: Student answer is invalid or too short: '{clean_answer}'")
             return {
                 "score": 0.0,
-                "feedback": "I couldn't hear your answer clearly. Could you please repeat it?",
+                "feedback": "I couldn't hear your answer clearly. Please ensure you are speaking into the microphone.",
                 "evaluation": "incorrect",
                 "is_system_action": False
             }
@@ -290,24 +312,24 @@ Identify the student's intent. Return ONLY a JSON object with this exact structu
                 }
 
             # 3. Evaluation
-            eval_prompt = f"""You are a Senior College Professor conducting a Viva exam. 
+            eval_prompt = f"""You are a Senior University Professor conducting a formal Viva examination. 
 Question: {question}
 Answer Key Reference: {answer_key}
 Student's Answer: {clean_answer}
 
-Evaluate the student's answer with LENIENT and ENCOURAGING scoring. 
+Evaluate the student's response based on technical accuracy and conceptual understanding.
 
 Rules for Evaluation:
-1. LENIENT SCORING: Be generous with marks. If the student has the right idea, give them high marks (e.g., 8-10). 
-2. STT ERROR TOLERANCE: Speech-to-text (STT) can sometimes mishear words (e.g., "prong" instead of "prompt"). If you see a word that sounds similar to a technical term or makes sense in context, assume the student said the correct word. DO NOT penalize for spelling or phonetic mismatches from the STT.
-3. INTENT OVER PERFECTION: Focus on whether the student understands the core concept. Even if the explanation is slightly messy or incomplete, if the core intent is correct, give full or near-full marks.
-4. FEEDBACK: Provide positive, constructive, and encouraging feedback (1-2 sentences). 
+1. PROFESSIONALISM: Provide formal, academic feedback. Avoid conversational filler or follow-up questions like "tell us more" or "what are your thoughts". Focus purely on the quality of the answer provided.
+2. LENIENT SCORING: While maintaining academic standards, be encouraging with marks. If the student demonstrates a solid grasp of the core concept, assign high marks (8.0-10.0).
+3. STT ERROR TOLERANCE: Speech-to-text (STT) may produce phonetic errors (e.g., "prong" instead of "prompt"). If a word sounds similar to a technical term or fits the context, assume the student used the correct terminology.
+4. FEEDBACK: Provide 1-2 sentences of professional assessment. Acknowledge what was correct and briefly mention any significant omissions if applicable.
 
 Scoring Scale:
-- 9.0 - 10.0: Core concept is understood (even if STT has minor errors).
-- 7.0 - 8.5: Mostly correct but missing some details.
-- 5.0 - 6.5: Partially correct or shows some basic understanding.
-- Below 5.0: Only if the answer is completely unrelated or empty.
+- 9.0 - 10.0: Excellent understanding with technical accuracy.
+- 7.0 - 8.5: Good understanding, though some minor technical details may be missing.
+- 5.0 - 6.5: Basic conceptual understanding but lacks technical depth.
+- Below 5.0: Significant misunderstandings or the answer is largely irrelevant.
 
 Return ONLY a JSON object:
 {{
