@@ -25,13 +25,22 @@ if GOOGLE_API_KEY:
 
 class VoiceService:
     def __init__(self):
+        # Log masked keys for production debugging
+        def mask_key(key):
+            if not key: return "MISSING"
+            return f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "****"
+
+        logger.info(f"INIT: ElevenLabs Key: {mask_key(ELEVENLABS_API_KEY)}")
+        logger.info(f"INIT: Gemini Key: {mask_key(GOOGLE_API_KEY)}")
+
         if not ELEVENLABS_API_KEY:
-            raise ValueError("ELEVENLABS_API_KEY environment variable not set.")
+            logger.error("ELEVENLABS_API_KEY is not set!")
         if not GOOGLE_API_KEY:
-            raise ValueError("GEMINI_API_KEY environment variable not set.")
+            logger.error("GEMINI_API_KEY (or GOOGLE_API_KEY) is not set!")
         
         self.elevenlabs = AsyncElevenLabs(api_key=ELEVENLABS_API_KEY)
-        genai.configure(api_key=GOOGLE_API_KEY)
+        if GOOGLE_API_KEY:
+            genai.configure(api_key=GOOGLE_API_KEY)
         
         self.model_names = [
             'gemini-2.5-flash',
@@ -392,7 +401,12 @@ Return ONLY a JSON object:
             raise Exception("All Gemini models failed during evaluation.")
 
         except Exception as e:
-            logger.error(f"EVALUATION: Final fallback triggered: {str(e)}")
+            error_details = str(e)
+            logger.error(f"EVALUATION: Final fallback triggered! Reason: {error_details}")
+            # If it's an auth error, log it specifically
+            if "401" in error_details or "API_KEY_INVALID" in error_details:
+                logger.error("CRITICAL: Gemini API Key is invalid or expired in production.")
+            
             return {
                 "score": 0.0,
                 "feedback": "I've received your answer. Let's move to the next question as I'm having a bit of trouble processing the evaluation right now.",

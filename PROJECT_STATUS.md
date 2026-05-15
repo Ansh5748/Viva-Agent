@@ -45,6 +45,7 @@ An AI-powered viva platform for colleges that integrates voice AI with exam mana
 - [x] **AI Professionalism**: Refined Gemini evaluation prompt to provide formal, academic feedback without conversational filler or follow-up questions.
 - [x] **Noise Handling**: Added robust noise markers (e.g., '(logo whooshing)') to skip unnecessary LLM processing for invalid audio.
 - [x] **Production Readiness**: Unified `UPLOAD_DIR` logic for Docker persistence and added cross-compatibility for `GOOGLE_API_KEY` / `GEMINI_API_KEY` environment variables.
+- [x] **Production Debugging**: Added masked API key logging and detailed error tracking to diagnose Render deployment issues.
 - [x] **Deployment Fixes**: Added missing dependencies (`edge-tts`, `gTTS`) to `requirements.txt` to resolve Render deployment failures.
 
 ### ✅ Tested
