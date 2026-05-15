@@ -880,7 +880,7 @@ const VivaExamPage = () => {
         <div className="flex-1 flex flex-col items-center justify-center gap-8 py-4">
           {!feedback ? (
             <div className="flex flex-col items-center gap-8 w-full max-w-lg">
-              <div className="flex items-center justify-center gap-12 w-full">
+              <div className="flex items-center justify-center w-full">
                 <div className="relative">
                   {isRecording && (
                     <div className="absolute inset-0 bg-red-500/20 rounded-full animate-ping scale-150 -z-10"></div>
@@ -903,21 +903,6 @@ const VivaExamPage = () => {
                     )}
                   </button>
                 </div>
-
-                {isRecording && (
-                  <Button 
-                    variant="destructive" 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      console.log("STOP_BUTTON_CLICKED");
-                      stopRecording();
-                    }}
-                    className="rounded-2xl px-6 py-4 h-auto text-sm font-bold uppercase tracking-widest animate-fade-in shadow-lg hover:scale-105 transition-transform z-20"
-                  >
-                    <StopCircle className="w-4 h-4 mr-2" />
-                    Stop Answering
-                  </Button>
-                )}
               </div>
 
               <div className="text-center">

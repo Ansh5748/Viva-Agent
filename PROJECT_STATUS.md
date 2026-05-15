@@ -32,18 +32,20 @@ An AI-powered viva platform for colleges that integrates voice AI with exam mana
 - [x] **Security**: Tab-switch/Window blur detection (3-strike system) with auto-submit.
 - [x] **Resilience**: Resuming in-progress exams, Browser-based TTS fallback for cost/latency optimization.
 - [x] **Smart Interaction**: Context-aware end-of-exam voice prompts and intelligent intent detection.
-- [x] **UI/UX Refinement**: Dynamic feedback text for exam completion and optimized layout for voice recording controls (side-by-side buttons for better accessibility).
+- [x] **UI/UX Refinement**: Dynamic feedback text for exam completion and simplified voice recording controls (unified toggle button).
 - [x] **Protected Routes**: Role-based access control for all dashboards.
 - [x] **Design System**: Figtree font, custom gradients (`brand`, `ar`, `success`, `food`), and Shadcn/UI integration.
 - [x] **Dashboard Optimization**: Refactored Student Dashboard to a 4-column stats layout for better visibility of performance metrics.
 
 ### ✅ Issues Resolved
 - [x] **Voice Latency/Cost**: Optimized STT/TTS pipeline by using pre-generated voices and browser fallback. Reordered ElevenLabs voice IDs to prioritize working models.
-- [x] **Gemini 404s**: Corrected model naming and added startup diagnostics. Updated to support Gemini 2.5 and 3.0 preview models.
+- [x] **Gemini 404s**: Corrected model naming and added startup diagnostics. Updated to support Gemini 2.5 and 3.0 preview models with automatic model name prefixing.
 - [x] **Redundant Calls**: Eliminated real-time ElevenLabs TTS during viva; all interactions now render pre-generated or browser-synthesized audio.
 - [x] **Blank Screens**: Fixed missing `Activity` icon import in `StudentDashboard.jsx` and added type safety to feedback processing in `VivaExamPage.jsx`.
 - [x] **AI Professionalism**: Refined Gemini evaluation prompt to provide formal, academic feedback without conversational filler or follow-up questions.
 - [x] **Noise Handling**: Added robust noise markers (e.g., '(logo whooshing)') to skip unnecessary LLM processing for invalid audio.
+- [x] **Production Readiness**: Unified `UPLOAD_DIR` logic for Docker persistence and added cross-compatibility for `GOOGLE_API_KEY` / `GEMINI_API_KEY` environment variables.
+- [x] **Deployment Fixes**: Added missing dependencies (`edge-tts`, `gTTS`) to `requirements.txt` to resolve Render deployment failures.
 
 ### ✅ Tested
 - [x] **Backend Tests**: Root API, Auth failures, College creation.

@@ -17,7 +17,10 @@ load_dotenv(ROOT_DIR / '.env')
 logger = logging.getLogger(__name__)
 
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+# Support both GEMINI_API_KEY and GOOGLE_API_KEY for deployment compatibility
+GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+if GOOGLE_API_KEY:
+    GOOGLE_API_KEY = GOOGLE_API_KEY.strip()
 
 
 class VoiceService:
@@ -271,12 +274,24 @@ Identify the student's intent. Return ONLY a JSON object with this exact structu
 """
             intent = "answer"
             intent_detected = False
-            for m_name in self.model_names:
+            
+            # Prepare a list of candidate model names (both bare and prefixed)
+            candidate_models = []
+            for m in self.model_names:
+                if not m.startswith('models/'):
+                    candidate_models.append(m)
+                    candidate_models.append(f"models/{m}")
+                else:
+                    candidate_models.append(m)
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            candidate_models = [x for x in candidate_models if not (x in seen or seen.add(x))]
+
+            for m_name in candidate_models:
                 try:
                     logger.info(f"INTENT: Trying model {m_name}")
                     model = genai.GenerativeModel(m_name)
-                    # We'll use generate_content instead of async to see if it makes a difference in error handling
-                    # but since we are in an async function, let's keep it async but add a shorter timeout if possible
                     response = await model.generate_content_async(intent_prompt, generation_config={"response_mime_type": "application/json"})
                     if response and response.text:
                         parsed = self._parse_gemini_json(response.text)
@@ -287,9 +302,6 @@ Identify the student's intent. Return ONLY a JSON object with this exact structu
                 except Exception as e:
                     error_msg = str(e)
                     logger.error(f"INTENT: Model {m_name} failed: {error_msg}")
-                    if "404" in error_msg:
-                        continue # Try next model
-                    # If it's something else like quota, we might want to stop
                     continue
             
             if not intent_detected:
@@ -339,7 +351,20 @@ Return ONLY a JSON object:
   "follow_up_hint": "string"
 }}
 """
-            for m_name in self.model_names:
+            # Prepare a list of candidate model names (both bare and prefixed)
+            candidate_models = []
+            for m in self.model_names:
+                if not m.startswith('models/'):
+                    candidate_models.append(m)
+                    candidate_models.append(f"models/{m}")
+                else:
+                    candidate_models.append(m)
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            candidate_models = [x for x in candidate_models if not (x in seen or seen.add(x))]
+
+            for m_name in candidate_models:
                 try:
                     logger.info(f"EVALUATION: Trying model {m_name}")
                     model = genai.GenerativeModel(m_name)

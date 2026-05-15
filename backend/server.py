@@ -88,7 +88,16 @@ db = client[os.environ['DB_NAME']]
 
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "divyanshgupta5748@gmail.com")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "#PSTDG5748")
-UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "/app/backend/uploads"))
+
+# Unified UPLOAD_DIR resolution for local and production (Docker/Render)
+env_upload_dir = os.environ.get("UPLOAD_DIR", "uploads")
+if os.path.isabs(env_upload_dir):
+    UPLOAD_DIR = Path(env_upload_dir)
+else:
+    # Resolve relative to project root
+    UPLOAD_DIR = Path(os.getcwd()) / env_upload_dir
+
+logger.info(f"Storage: Initializing UPLOAD_DIR at {UPLOAD_DIR.absolute()}")
 UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 
 from fastapi.exceptions import RequestValidationError
